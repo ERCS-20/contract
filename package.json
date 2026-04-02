@@ -1,0 +1,16 @@
+{
+  "name": "dogex-contracts",
+  "scripts": {
+    "node:local": "hardhat node --hostname 0.0.0.0 --port 8545"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "hardhat": "^2.23.0"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^4.9.0",
+    "@uniswap/v3-periphery": "^1.4.4",
+    "dotenv": "^16.5.0",
+    "web3": "^4.16.0"
+  }
+}
