@@ -71,6 +71,26 @@ This fits innovative fundraising and on-chain equity expression; **a full on-cha
 
 > The table is **economic / product** framing only. Rights, compliance, and disclosure must be validated for each jurisdiction. This repo is a **smart-contract reference**, not legal or investment advice.
 
+## Project roadmap (two phases) — enabling liquidity expansion
+
+In its current form, the ERCS20 pool is initialized with a fixed inventory on-chain. Because it does not continuously replenish liquidity like a mature venue, prices can become highly volatile under thin-liquidity conditions or during large trades.
+
+To address this critical weakness, the project evolves from a single AMM pool into a full decentralized exchange system designed to provide persistent liquidity and deeper market depth.
+
+We ship in two phases:
+
+1. **Phase 1: Uniswap-style exchange experience (UI first)**  
+   Build a front-end and interactive swap page so users can exchange ERCS20 with the quote asset conveniently. This phase focuses on usability and trading-entry experience: users should not need to understand contract internals to trade reliably.
+
+2. **Phase 2: dYdX-style decentralized exchange (spot + futures) + staking mining**  
+   Deploy a more complete DEX:
+   - Support **spot** and **futures** trading.  
+   - Use a dYdX-like workflow of **off-chain signing + on-chain settlement** (orders are signed off-chain, then validated and settled on-chain).  
+   - Add **staking & mining**: users stake a protocol token to participate in mining.  
+   - **Fee distribution**: exchange fees are split into two portions—one for project/platform operations, and the other allocated to mining rewards via the staking platform.  
+
+By starting with a practical trading entry and progressively upgrading into a liquidity-sustaining venue with derivatives and incentives, the community can begin using and validating early while forming a healthier liquidity and reward loop over time.
+
 ---
 
 ## Tech stack
