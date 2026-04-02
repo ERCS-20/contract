@@ -8,7 +8,7 @@ This repository is a reference implementation of that paradigm: **Equity Request
 
 ---
 
-## What ERCS-20 is designed to fix (in one glance)
+## What ERCS-20 is designed to fix
 
 ERCS-20 is not “yet another token.” It is a **tokenized stock primitive** that tries to solve several structural problems seen in common AMM pairs and orderbook listings:
 
