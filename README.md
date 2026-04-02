@@ -8,6 +8,32 @@ This repository is a reference implementation of that paradigm: **Equity Request
 
 ---
 
+## What ERCS-20 is designed to fix (in one glance)
+
+ERCS-20 is not “yet another token.” It is a **tokenized stock primitive** that tries to solve several structural problems seen in common AMM pairs and orderbook listings:
+
+1. **Bootstrapping a Uniswap pair requires real capital (initial price = locked cash)**  
+   In a typical Uniswap-style launch, the initial price is set by depositing *real* quote liquidity into the pool—and that capital is effectively locked as liquidity. ERCS-20 introduces the idea of **virtual / accounting-based initial reserves** to anchor an initial price without forcing the issuer to permanently park that cash in a removable LP position.  
+   The intended outcome is that the company can deploy capital more efficiently (e.g., into operations or even buying stock through the same on-chain mechanism), while still starting from a deterministic opening price.
+
+2. **Approval phishing / allowance fraud on “buy” flows**  
+   Many ERC20 purchase flows require users to `approve()` a spender, which is a common phishing vector. ERCS-20 is designed around a **no-allowance trading path**:
+   - **Buy**: deposit the quote asset into the contract (native quote in this implementation), receive tokens.
+   - **Sell**: send tokens into the contract (or call `sell()`), receive the quote asset out.
+   This “transfer-in to trade” pattern reduces reliance on third-party allowances and helps mitigate approval-based scams at the UX layer.
+
+3. **Liquidity removal rug-risk and “token goes to zero because liquidity disappears”**  
+   In many AMMs, LPs can remove liquidity, and in many orderbooks there may be no market-making depth. Both can lead to catastrophic slippage and “effectively zero” price outcomes for holders. ERCS-20 aims to avoid that class of failure by making liquidity **contract-custodied**: the token inventory is minted to the contract at deployment, and there is **no LP position to withdraw** in the usual sense.  
+   Users can only obtain tokens from the pool by depositing the quote asset according to the AMM curve, which is intended to keep pricing tied to an on-chain reserve system rather than removable third-party liquidity.
+
+4. **Secondary-market trading generates revenue for venues, not for the issuer**  
+   In traditional listings, most trading fees go to exchanges and intermediaries. ERCS-20 is designed so that a portion of each trade’s value (a protocol fee) can be accumulated and **withdrawn to a company/treasury-controlled address**, improving the issuer’s cash flow and long-term incentives (e.g., funding R&D and operations).  
+   (In this repo’s current implementation, the output-side fee is ≈ **0.2% (1/500)**; see source.)
+
+5. **Non-dilutive “re-financing” via preselling future fee revenue rights**  
+   Instead of raising again through new-share issuance (dilution), the protocol narrative is to raise capital by **preselling rights to future trading-fee cash flows**. Existing holders keep their ownership percentages; new capital gains long-duration, fee-linked cash-flow exposure.  
+   (This repo ships the fee accrual and withdrawal primitives; the presale/distribution layer is a product/extension module.)
+
 ## Design rationale
 
 ### Non-dilutive financing: presale of fee revenue rights (product narrative)
