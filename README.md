@@ -36,66 +36,32 @@ ERCS-20 is not “yet another token.” It is a **tokenized stock primitive** th
 
 ## Design rationale
 
-### Non-dilutive financing: presale of fee revenue rights (product narrative)
+ERCS-20 combines a **tokenized stock primitive** with an AMM-style market and a fee-capture mechanism to realign incentives between issuers, traders, and long-term holders.
 
-For large capital needs, instead of the classic path **new issuance → dilution of existing holders**, you can prioritize **non-dilutive** instruments:
+### 1) Liquidity sovereignty (why the market lives in the contract)
 
-- **Existing shareholders**: voting power and ownership percentages can stay unchanged across a new funding round.  
-- **New investors**: they need not (or may not) buy new shares directly; they can **subscribe to rights over future trading-fee cash flows** (revenue rights, dividend-like rights, or legally wrapped equivalents), gaining **long-dated exposure** tied to secondary-market activity.  
-- **The company**: receives capital upfront or in tranches while assigning part of future **fee income from liquidity** to new capital—a **“cash today, repaid by tomorrow’s trading revenue”** structure.
+The core idea is to keep **pricing and fee capture** inside an on-chain rule set, rather than outsourcing value to third-party venues:
 
-> **Relation to this codebase:** that **fee-revenue presale** layer is **product and legal structuring** (e.g. separate revenue-rights tokens, trusts/SPVs, off-chain agreements). The **`ERCS20` contracts here mainly implement “stock token + AMM + fee accrual and withdrawal.”** Splitting, preselling, and distributing revenue rights can be built in upper layers or follow-on modules.
+- **Contract-custodied inventory**: total supply is minted to the contract at deployment, so there is no “LP position” that a third party can remove in the usual AMM sense.
+- **Continuous pricing**: swaps follow a constant-product curve \(x \times y = k\) between the stock token and the quote asset (native quote in this implementation).
+- **Fee recapture**: a portion of swap value is accumulated and can be withdrawn to an issuer/treasury-controlled address (see `withdrawAddr` / `withdrawFee`).
 
-### Pain points of traditional equity financing
+### 2) Non-dilutive financing narrative (preselling future fee revenue rights)
 
-1. **Cheap founder stock and misaligned incentives**  
-   Founders and early holders often hold large stakes at very low cost. After listing, without strong constraints they may sell into strength and exit, sometimes harming long-term holders; the operating company may still capture little from day-to-day secondary trading.
+For large capital needs, the narrative is to avoid **new-share issuance → dilution** by raising capital via **preselling rights to future trading-fee cash flows**:
 
-2. **Liquidity value flows to intermediaries**  
-   Active trading reflects consensus, but fees and market-making economics often accrue to exchanges and middlemen, weakening the issuer’s incentive to protect valuation and liquidity quality.
+- incumbents keep ownership structure unchanged;
+- new capital gains long-duration, fee-linked cash-flow exposure;
+- the issuer converts future liquidity revenue into upfront funding.
 
-3. **Market cap vs. cash flow**  
-   Funding is concentrated in IPOs and follow-ons; rising share prices do not automatically become usable corporate cash—**“high market cap, thin wallet.”**
+> **Scope note:** this repo provides the fee accrual + withdrawal primitives. The presale/distribution instrument (revenue-rights token, sale contract, or legal wrapper) is an upper-layer module.
 
-### Tokenized stock + AMM: technical base for liquidity sovereignty
+### 3) Why this differs from both AMM pairs and orderbooks
 
-Here **liquidity sovereignty** means keeping **pricing and fee capture** as much as possible **inside the issuer’s rule set**, not fully leaking to third-party venues. Smart contracts bind the **stock token** and the **liquidity pool** under one math and permission model:
+- Compared to typical AMM pairs: ERCS-20 aims to reduce “liquidity removal → collapse” failure modes by keeping inventory inside the contract.
+- Compared to pure orderbooks: ERCS-20 provides an always-on pricing curve (though depth still depends on reserves and market participation).
 
-1. **Fixed supply, initially custodied by the contract**  
-   Total supply is set at deployment; tokens can be minted entirely to the contract as inventory. Float is released through the AMM **without ad-hoc dilutive mints** (large raises can use parallel tools such as **fee-revenue presales**, above).
-
-2. **Uniswap V2–style constant-product pricing**  
-   Reserves follow \(x \times y = k\) between the **stock token** and a **quote asset** (e.g. USDC or the chain’s native quote), enabling continuous prices without a central limit order book.
-
-3. **Opening price from initial reserves**  
-   Initial stock-side and quote-side reserve parameters set the starting exchange rate. Example: if reserves imply **1M tokens** vs **1M USDC**, the implied spot is about **1 USDC per token** (actual values follow constructor parameters on-chain).
-
-4. **No zero-cost founder shares: everyone swaps in stablecoins under the same curve**  
-   Under a **“full float in the pool”** design, **founders and early insiders who want tokens from the pool must still deposit quote assets and trade the curve**, like everyone else—reducing **“free founder stock + secondary dump”** dynamics.
-
-5. **Fees to the company (or treasury): liquidity as income**  
-   Swaps can charge a fee on the output side and route it to a configurable address (here, e.g. **`withdrawAddr`** / **`withdrawFee`**), tying **secondary-market activity to withdrawable cash** (exact fee rate: see source).
-
-### Conceptual comparison
-
-| Dimension | Traditional equities | Liquidity sovereignty / this model |
-|-----------|----------------------|-------------------------------------|
-| Large raises vs. dilution | Often new issuance; dilutes incumbents | Can stay **non-dilutive** via **presales of future fee revenue rights** (product design) |
-| New investor returns | Mostly price + dividend policy | Can link to **long-horizon trading-fee cash flows** (needs a dedicated rights vehicle) |
-| Issuer benefit from secondary trading | Usually none directly | Fees can **accrue to issuer/treasury by rule** (this repo: accrual + withdrawal path) |
-| Early stock acquisition | Often very low subscription/strike cost | **Must swap quote into the AMM**—no privileged zero-cost pool |
-| Where liquidity value goes | Mostly venues and intermediaries | Can **stay with protocol and issuer** (liquidity sovereignty) |
-
-### Summary
-
-- **For the company:** raise large checks **without necessarily diluting legacy holders** (fee-revenue presales, etc.) while making **trading fees** a plannable revenue line (**liquidity as income**).  
-- **For existing holders:** ownership can remain stable; new capital is served by **future liquidity revenue rights**.  
-- **For new investors:** exposure to **fee-linked cash flows** tied to secondary activity (legal form depends on jurisdiction).  
-- **For the ecosystem:** pricing and value distribution are constrained by **public on-chain rules**, reducing opaque misalignment.
-
-This fits innovative fundraising and on-chain equity expression; **a full on-chain presale module for revenue rights can ship as a later iteration.**
-
-> The table is **economic / product** framing only. Rights, compliance, and disclosure must be validated for each jurisdiction. This repo is a **smart-contract reference**, not legal or investment advice.
+> This section is economic/product framing only. Rights, compliance, and disclosure must be validated per jurisdiction. Nothing here is investment advice.
 
 ## Project roadmap (two phases) — enabling liquidity expansion
 
