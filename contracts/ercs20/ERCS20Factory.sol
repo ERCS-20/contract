@@ -23,6 +23,11 @@ contract ERCS20Factory is Pausable, Ownable {
     /// @notice Registry of symbols used by this factory.
     mapping(string => bool) public symbols;
 
+    /// @notice Emitted when a new ERCS20 token contract is created.
+    /// @param ercs20 The ERCS20 token address.
+    /// @param index Sequential index assigned by the factory/creator.
+    event Create(address indexed ercs20, uint256 index);
+
     /// @notice Deploys a new ERCS20 token contract and transfers its ownership.
     /// @param name ERC20 name for the new token.
     /// @param symbol ERC20 symbol for the new token.
@@ -36,7 +41,10 @@ contract ERCS20Factory is Pausable, Ownable {
 
         ERCS20 ercs20 = new ERCS20(name, symbol, totalSupply, usdcAmount, index++);
         ercs20.transferOwnership(newOwner);
+        ercs20.setWithdrawAddr(newOwner);
         ercs20s[address(ercs20)] = true;
+
+        emit Create(address(ercs20), index-1);
     }
 
     /// @notice Pauses factory creation operations.
