@@ -41,7 +41,6 @@ contract ERCS20Factory is Pausable, Ownable {
 
         ERCS20 ercs20 = new ERCS20(name, symbol, totalSupply, usdcAmount, index++);
         ercs20.transferOwnership(newOwner);
-        ercs20.setWithdrawAddr(newOwner);
         ercs20s[address(ercs20)] = true;
 
         emit Create(address(ercs20), index-1);
