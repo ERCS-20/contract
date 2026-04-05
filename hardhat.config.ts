@@ -1,5 +1,6 @@
 import "@nomicfoundation/hardhat-toolbox";
 import * as dotenv from "dotenv";
+import { HDNodeWallet } from "ethers";
 import { HardhatUserConfig } from "hardhat/config";
 
 dotenv.config();
