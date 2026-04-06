@@ -20,8 +20,8 @@ contract ERCS20Factory is Pausable, Ownable {
     uint256 public index;
     /// @notice Registry of contracts created by this factory.
     mapping(address => bool) public ercs20s;
-    /// @notice Registry of symbols used by this factory.
-    mapping(string => bool) public symbols;
+    /// @notice Maps symbol string to the ERCS20 token address created for that symbol (zero if unused).
+    mapping(string => address) public symbols;
 
     /// @notice Emitted when a new ERCS20 token contract is created.
     /// @param ercs20 The ERCS20 token address.
@@ -36,10 +36,10 @@ contract ERCS20Factory is Pausable, Ownable {
     /// @param newOwner Address that receives ownership of the new ERCS20 contract.
     function create(string memory name, string memory symbol, uint256 totalSupply, uint256 usdcAmount, address newOwner) external whenNotPaused {
 
-        require(!symbols[symbol], "ERCS20Factory: SYMBOL_EXISTS");
-        symbols[symbol] = true;
+        require(symbols[symbol] == address(0), "ERCS20Factory: SYMBOL_EXISTS");
 
         ERCS20 ercs20 = new ERCS20(name, symbol, totalSupply, usdcAmount, index++);
+        symbols[symbol] = address(ercs20);
         ercs20.transferOwnership(newOwner);
         ercs20s[address(ercs20)] = true;
 

@@ -65,7 +65,7 @@ describe("ERCS20Factory", function () {
         expect(await token.usdcSeedAmount()).to.equal(usdcAmount);
         expect(await token.owner()).to.equal(tokenOwner.address);
         expect(await factory.ercs20s(tokenAddress)).to.equal(true);
-        expect(await factory.symbols(tokenSymbol)).to.equal(true);
+        expect(await factory.symbols(tokenSymbol)).to.equal(tokenAddress);
         expect(await factory.index()).to.equal(1n);
     });
 
@@ -111,8 +111,11 @@ describe("ERCS20Factory", function () {
         await expect(factory.connect(other).unpause()).to.be.revertedWith("Ownable: caller is not the owner");
 
         await factory.unpause();
-        await factory.create("P", "SYM_P", totalSupply, usdcAmount, tokenOwner.address);
-        expect(await factory.symbols("SYM_P")).to.equal(true);
+        const txP = await factory.create("P", "SYM_P", totalSupply, usdcAmount, tokenOwner.address);
+        const receiptP = await txP.wait();
+        expect(receiptP).to.not.be.null;
+        const { tokenAddress: addrP } = getPairCreatedFromReceipt(receiptP!);
+        expect(await factory.symbols("SYM_P")).to.equal(addrP);
     });
 
     it("second pause or unpause when not applicable reverts", async function () {
