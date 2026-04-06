@@ -1,4 +1,4 @@
-import { loadFixture } from "@nomicfoundation/hardhat-toolbox/network-helpers";
+import { loadFixture, time } from "@nomicfoundation/hardhat-toolbox/network-helpers";
 import { expect } from "chai";
 import { ethers } from "hardhat";
 
@@ -19,6 +19,11 @@ function expectedGetAmountOut(
         : (amount * usdReserve) / (ercs20Reserve + amount);
     const fee = gross / 500n;
     return [gross - fee, fee];
+}
+
+/** Valid swap deadline: current block time + buffer (seconds). */
+async function futureDeadline(offsetSec: bigint = 3600n): Promise<bigint> {
+    return BigInt(await time.latest()) + offsetSec;
 }
 
 describe("ERCS20", function() {
@@ -92,7 +97,7 @@ describe("ERCS20", function() {
         const [x, y] = await ercs20.getReserves();
         const quoteIn = ethers.parseUnits("1", 18);
         const buyExpected = expectedGetAmountOut(quoteIn, true, x, y);
-        await ercs20.connect(deployer).buy(buyExpected[0], { value: quoteIn });
+        await ercs20.connect(deployer).buy(buyExpected[0], await futureDeadline(), { value: quoteIn });
 
         const Attacker = await ethers.getContractFactory("ERCS20SellReentrant");
         const attacker = await Attacker.deploy(ercs20);
@@ -166,7 +171,7 @@ describe("ERCS20", function() {
             const {ercs20} = await loadFixture(createFixture);
             const amountIn = ethers.parseUnits("1", 18);
 
-            await ercs20.buy(await ercs20.getAmountOut(amountIn, true).then((r) => r[0]), {
+            await ercs20.buy(await ercs20.getAmountOut(amountIn, true).then((r) => r[0]), await futureDeadline(), {
                 value: amountIn,
             });
 
@@ -302,7 +307,7 @@ describe("ERCS20", function() {
         const amount = ethers.parseUnits("1", 18);
         const buyExpected = expectedGetAmountOut(amount, true, x, y);
 
-        const tx = await ercs20.buy(buyExpected[0], { value: amount });
+        const tx = await ercs20.buy(buyExpected[0], await futureDeadline(), { value: amount });
         const txReceipt = await tx.wait();
         expect(txReceipt).to.not.be.null;
         const gasFee = txReceipt!.gasUsed * txReceipt!.gasPrice!;
@@ -359,7 +364,7 @@ describe("ERCS20", function() {
 
         const sellExpected = expectedGetAmountOut(sellAmount, false, x1, y1);
 
-        const tx2 = await ercs20.sell(sellAmount, sellExpected[0]);
+        const tx2 = await ercs20.sell(sellAmount, sellExpected[0], await futureDeadline());
         const receipt2 = await tx2.wait();
         expect(receipt2).to.not.be.null;
         const gasFee2 = receipt2!.gasUsed * receipt2!.gasPrice!;
@@ -396,7 +401,7 @@ describe("ERCS20", function() {
         const amount = ethers.parseUnits("1", 18);
         const buyExpected = expectedGetAmountOut(amount, true, x, y);
 
-        await expect(ercs20.buy(buyExpected[0], { value: amount }))
+        await expect(ercs20.buy(buyExpected[0], await futureDeadline(), { value: amount }))
             .to.emit(ercs20, "Sync")
             .withArgs(x - buyExpected[0] - buyExpected[1], y + amount)
             .to.emit(ercs20, "Swap")
@@ -412,7 +417,7 @@ describe("ERCS20", function() {
         const amount = ethers.parseUnits("1", 18);
         const buyExpected = expectedGetAmountOut(amount, true, x, y);
 
-        await expect(ercs20.buy(buyExpected[0], { value: amount }))
+        await expect(ercs20.buy(buyExpected[0], await futureDeadline(), { value: amount }))
             .to.emit(ercs20, "Sync")
             .withArgs(x - buyExpected[0] - buyExpected[1], y + amount)
             .to.emit(ercs20, "Swap")
@@ -422,7 +427,7 @@ describe("ERCS20", function() {
         const sellAmount = buyExpected[0];
         const sellExpected = expectedGetAmountOut(sellAmount, false, x1, y1);
 
-        await expect(ercs20.sell(sellAmount, sellExpected[0]))
+        await expect(ercs20.sell(sellAmount, sellExpected[0], await futureDeadline()))
             .to.emit(ercs20, "Sync")
             .withArgs(x1 + sellAmount, y1 - sellExpected[0] - sellExpected[1])
             .to.emit(ercs20, "Swap")
@@ -437,10 +442,10 @@ describe("ERCS20", function() {
         const buyExpected = expectedGetAmountOut(amount, true, x, y);
 
         await expect(
-            ercs20.buy(buyExpected[0] + 1n, { value: amount })
+            ercs20.buy(buyExpected[0] + 1n, await futureDeadline(), { value: amount })
         ).to.be.revertedWith(/ERCS20: INSUFFICIENT_OUTPUT_AMOUNT/);
 
-        await ercs20.buy(buyExpected[0], { value: amount });
+        await ercs20.buy(buyExpected[0], await futureDeadline(), { value: amount });
     });
 
     it("sell amountInMin", async function() {
@@ -449,17 +454,101 @@ describe("ERCS20", function() {
         const [x, y] = await ercs20.getReserves();
         const amount = ethers.parseUnits("1", 18);
         const buyExpected = expectedGetAmountOut(amount, true, x, y);
-        await ercs20.buy(buyExpected[0], { value: amount });
+        await ercs20.buy(buyExpected[0], await futureDeadline(), { value: amount });
 
         const [x1, y1] = await ercs20.getReserves();
         const sellAmount = buyExpected[0];
         const sellExpected = expectedGetAmountOut(sellAmount, false, x1, y1);
 
-        await expect(ercs20.sell(sellAmount, sellExpected[0] + 1n)).to.be.revertedWith(
+        await expect(ercs20.sell(sellAmount, sellExpected[0] + 1n, await futureDeadline())).to.be.revertedWith(
             /ERCS20: INSUFFICIENT_OUTPUT_AMOUNT/
         );
 
-        await ercs20.sell(sellAmount, sellExpected[0]);
+        await ercs20.sell(sellAmount, sellExpected[0], await futureDeadline());
+    });
+
+    describe("deadline", function () {
+        it("reverts buy when deadline is in the past", async function () {
+            const { ercs20 } = await loadFixture(createFixture);
+            const [x, y] = await ercs20.getReserves();
+            const amount = ethers.parseUnits("1", 18);
+            const buyExpected = expectedGetAmountOut(amount, true, x, y);
+            const past = BigInt(await time.latest()) - 1n;
+
+            await expect(
+                ercs20.buy(buyExpected[0], past, { value: amount })
+            ).to.be.revertedWith("ERCS20: EXPIRED");
+        });
+
+        it("reverts buy when block time passes deadline", async function () {
+            const { ercs20 } = await loadFixture(createFixture);
+            const [x, y] = await ercs20.getReserves();
+            const amount = ethers.parseUnits("1", 18);
+            const buyExpected = expectedGetAmountOut(amount, true, x, y);
+            const dl = BigInt(await time.latest()) + 10n;
+            await time.increase(20n);
+
+            await expect(
+                ercs20.buy(buyExpected[0], dl, { value: amount })
+            ).to.be.revertedWith("ERCS20: EXPIRED");
+        });
+
+        it("reverts sell when deadline is in the past", async function () {
+            const [deployer] = await ethers.getSigners();
+            const { ercs20 } = await loadFixture(createFixture);
+            const [x, y] = await ercs20.getReserves();
+            const amount = ethers.parseUnits("1", 18);
+            const buyExpected = expectedGetAmountOut(amount, true, x, y);
+            await ercs20.buy(buyExpected[0], await futureDeadline(), { value: amount });
+
+            const [x1, y1] = await ercs20.getReserves();
+            const sellAmount = buyExpected[0];
+            const sellExpected = expectedGetAmountOut(sellAmount, false, x1, y1);
+            const past = BigInt(await time.latest()) - 1n;
+
+            await expect(ercs20.sell(sellAmount, sellExpected[0], past)).to.be.revertedWith(
+                "ERCS20: EXPIRED"
+            );
+        });
+
+        it("reverts sell when block time passes deadline", async function () {
+            const { ercs20 } = await loadFixture(createFixture);
+            const [x, y] = await ercs20.getReserves();
+            const amount = ethers.parseUnits("1", 18);
+            const buyExpected = expectedGetAmountOut(amount, true, x, y);
+            await ercs20.buy(buyExpected[0], await futureDeadline(), { value: amount });
+
+            const [x1, y1] = await ercs20.getReserves();
+            const sellAmount = buyExpected[0];
+            const sellExpected = expectedGetAmountOut(sellAmount, false, x1, y1);
+            const dl = BigInt(await time.latest()) + 10n;
+            await time.increase(20n);
+
+            await expect(ercs20.sell(sellAmount, sellExpected[0], dl)).to.be.revertedWith(
+                "ERCS20: EXPIRED"
+            );
+        });
+
+        it("allows buy and sell with type(uint256).max deadline (no time bound)", async function () {
+            const [deployer] = await ethers.getSigners();
+            const { ercs20 } = await loadFixture(createFixture);
+            const maxDl = ethers.MaxUint256;
+            const [x, y] = await ercs20.getReserves();
+            const amount = ethers.parseUnits("1", 18);
+            const buyExpected = expectedGetAmountOut(amount, true, x, y);
+
+            await time.increase(100_000n);
+            await ercs20.buy(buyExpected[0], maxDl, { value: amount });
+            expect(await ercs20.balanceOf(deployer)).to.equal(buyExpected[0]);
+
+            await time.increase(100_000n);
+            const [x1, y1] = await ercs20.getReserves();
+            const sellAmount = buyExpected[0];
+            const sellExpected = expectedGetAmountOut(sellAmount, false, x1, y1);
+            await ercs20.sell(sellAmount, sellExpected[0], maxDl);
+
+            expect(await ercs20.balanceOf(deployer)).to.equal(0n);
+        });
     });
 
     it("withdrawFee", async function() {
@@ -470,12 +559,12 @@ describe("ERCS20", function() {
         const [x, y] = await ercs20.getReserves();
         const amount = ethers.parseUnits("1", 18);
         const buyExpected = expectedGetAmountOut(amount, true, x, y);
-        await ercs20.buy(buyExpected[0], { value: amount });
+        await ercs20.buy(buyExpected[0], await futureDeadline(), { value: amount });
 
         const [x1, y1] = await ercs20.getReserves();
         const sellAmount = buyExpected[0];
         const sellExpected = expectedGetAmountOut(sellAmount, false, x1, y1);
-        await ercs20.sell(sellAmount, sellExpected[0]);
+        await ercs20.sell(sellAmount, sellExpected[0], await futureDeadline());
 
         const recipientEthBefore = await ethers.provider.getBalance(feeCollector);
         const recipientTokenBefore = await ercs20.balanceOf(feeCollector);

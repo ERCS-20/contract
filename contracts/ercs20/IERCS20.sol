@@ -35,10 +35,12 @@ interface IERCS20 is IERC20 {
     
     /// @notice Buys ERCS20 tokens with quote asset (USDC-chain native asset in implementation).
     /// @param amountInMin Minimum acceptable token output.
-    function buy(uint256 amountInMin) external payable;
+    /// @param deadline Unix timestamp after which the call reverts; use `type(uint256).max` to disable.
+    function buy(uint256 amountInMin, uint256 deadline) external payable;
 
     /// @notice Sells ERCS20 tokens for quote asset (USDC-chain native asset in implementation).
     /// @param amountOut Token amount to sell.
     /// @param amountInMin Minimum acceptable quote output.
-    function sell(uint256 amountOut, uint256 amountInMin) external;
+    /// @param deadline Unix timestamp after which the call reverts; use `type(uint256).max` to disable.
+    function sell(uint256 amountOut, uint256 amountInMin, uint256 deadline) external;
 }

@@ -103,9 +103,18 @@ contract ERCS20 is Ownable, ReentrancyGuard, IERCS20, ERC20 {
         return(amountOut, fee);
     }
 
+    /// @dev `deadline == type(uint256).max` skips the time bound (used by `receive`).
+    function _requireDeadline(uint256 deadline) private view {
+        if (deadline != type(uint256).max) {
+            require(block.timestamp <= deadline, "ERCS20: EXPIRED");
+        }
+    }
+
     /// @notice Buys tokens with quote asset on the USDC chain.
     /// @param amountInMin Minimum acceptable token output (slippage protection).
-    function buy(uint256 amountInMin) public payable virtual override {
+    /// @param deadline Latest valid block timestamp for this transaction (`type(uint256).max` = no check).
+    function buy(uint256 amountInMin, uint256 deadline) public payable virtual override {
+        _requireDeadline(deadline);
         require(msg.value > 0, "ERCS20: AMOUNT_IN_ERROR");
 
         (uint256 amountOut, uint256 fee) = getAmountOut(msg.value, true);
@@ -122,15 +131,18 @@ contract ERCS20 is Ownable, ReentrancyGuard, IERCS20, ERC20 {
     }
 
     /// @notice Convenience entrypoint to buy tokens by sending native quote asset directly.
+    /// @dev No deadline enforcement; prefer `buy` with an explicit `deadline` for mempool safety.
     receive() external payable {
-        buy(0);
+        buy(0, type(uint256).max);
     }
 
     /// @notice Sells tokens for quote asset by transferring tokens to this contract.
     /// @dev `_transfer` executes the pricing and native quote payout when `to == address(this)`.
     /// @param amountOut Token amount to sell.
     /// @param amountInMin Minimum acceptable quote asset received (slippage protection).
-    function sell(uint256 amountOut, uint256 amountInMin) external virtual override {
+    /// @param deadline Latest valid block timestamp for this transaction (`type(uint256).max` = no check).
+    function sell(uint256 amountOut, uint256 amountInMin, uint256 deadline) external virtual override {
+        _requireDeadline(deadline);
         uint256 balance = _msgSender().balance;
 
         _transfer(_msgSender(), address(this), amountOut);
