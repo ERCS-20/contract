@@ -1,26 +1,28 @@
 const { ethers } = require("hardhat");
 
-const pairCreatedIface = new ethers.Interface([
-    "event PairCreated(address indexed,address indexed,address,uint256)",
+const createIface = new ethers.Interface([
+    "event Create(address indexed ercs20, uint256 index)",
 ]);
 
-function getPairCreatedFromReceipt(receipt) {
+function getCreateFromReceipt(receipt) {
     for (const log of receipt.logs) {
         try {
-            const parsed = pairCreatedIface.parseLog({
+            const parsed = createIface.parseLog({
                 topics: log.topics,
                 data: log.data,
             });
-            if (parsed !== null && parsed.name === "PairCreated") {
-                const r = parsed.args;
-                const indexArg = r[r.length - 1];
-                return { tokenAddress: log.address, index: BigInt(String(indexArg)) };
+            if (parsed !== null && parsed.name === "Create") {
+                const { ercs20, index } = parsed.args;
+                return {
+                    tokenAddress: ercs20,
+                    index: BigInt(String(index)),
+                };
             }
         } catch {
-            /* not PairCreated */
+            /* not Create */
         }
     }
-    throw new Error("PairCreated log not found");
+    throw new Error("Create log not found");
 }
 
 async function main() {
@@ -33,10 +35,10 @@ async function main() {
     const totalSupply = ethers.parseUnits("100000000000", 18);
     const usdcAmount =  ethers.parseUnits("10000000", 18);
 
-    const tx = await factory.create("Orbix DAO", "OXD", totalSupply, usdcAmount, deployer.address);
+    const tx = await factory.create("Orbix DAO", "OBX", totalSupply, usdcAmount, deployer.address);
     const receipt = await tx.wait();
     console.log("receipt:", receipt);
-    const { tokenAddress, index } = getPairCreatedFromReceipt(receipt);
+    const { tokenAddress, index } = getCreateFromReceipt(receipt);
     console.log("tokenAddress:", tokenAddress);
     console.log("index:", index);
 }

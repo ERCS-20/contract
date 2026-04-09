@@ -72,7 +72,7 @@ To address this critical weakness, the project evolves from a single AMM pool in
 ## Orbix & OXD (note / risk disclosure)
 
 - **Exchange**: `Orbix` (website: `orbix.exchange`) is the planned decentralized exchange for expanding liquidity in the ERCS-20 ecosystem. Its goal is to provide deeper market depth and to serve as the execution layer for spot markets, derivatives, and incentive mechanisms over time.
-- **Protocol token**: `Orbix DAO` (symbol: `OXD`) is the **first token** introduced for the ERCS-20 ecosystem. It is intended for exchange-stage staking/mining programs, fee distribution, and broader ecosystem incentives (final mechanics depend on the production release).
+- **Protocol token**: `Orbix DAO` (symbol: `OBX`) is the **first token** introduced for the ERCS-20 ecosystem. It is intended for exchange-stage staking/mining programs, fee distribution, and broader ecosystem incentives (final mechanics depend on the production release).
 - **Experimental positioning**: Orbix and OXD form an **ERCS-20 experimental sandbox** to validate the feasibility and boundaries of “liquidity sovereignty,” fee recapture, and the non-dilutive financing narrative under real market conditions.
 - **High-risk disclaimer**: This project is under active development and experimentation. Smart-contract risk, mechanism/design risk, liquidity risk, and severe price volatility may occur. Please do your own research and understand the rules and risks before participating. **Participate cautiously and within your means.** Nothing in this repository constitutes investment advice.
 
