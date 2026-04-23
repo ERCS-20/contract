@@ -49,8 +49,6 @@ contract SpotExchange is Ownable {
     /// @notice Emitted when an address is removed from allowedKeys.
     event DAORemoved(address indexed addr);
 
-    /// @notice Emitted when trades are settled.
-    event TradesSettled(address indexed caller, address indexed taker, uint256 makerCount);
     /// @notice Emitted for each maker-taker fill in `settleTrades`.
     event TradeExecuted(
         address indexed maker,
@@ -70,8 +68,10 @@ contract SpotExchange is Ownable {
 
     error NotAllowedKey();
     error OrderExpired();
-    error PriceInvalid();
-    error Overfilled();
+    error MakerPriceInvalid();
+    error TakerPriceInvalid();
+    error MakerOverfilled();
+    error TakerOverfilled();
     error TokenPairMismatch();
     error InvalidAddress();
     error VaultNotSet();
@@ -173,12 +173,12 @@ contract SpotExchange is Ownable {
             bytes32 makerHash = _hashOrder(makerOrder);
             uint256 prevFilled = filledAmount[makerHash];
             uint256 newFilled = prevFilled + f.makerAmount;
-            if (newFilled > makerOrder.makerAmount) revert Overfilled();
+            if (newFilled > makerOrder.makerAmount) revert MakerOverfilled();
             filledAmount[makerHash] = newFilled;
 
             // Price constraint for this maker using its own fulfillment.
             if (f.takerAmount * makerOrder.makerAmount < f.makerAmount * makerOrder.takerAmount) {
-                revert PriceInvalid();
+                revert MakerPriceInvalid();
             }
 
             totalMakerAmount += f.makerAmount;
@@ -229,15 +229,13 @@ contract SpotExchange is Ownable {
         // Verify taker order price constraint.
         uint256 prevTakerFilled = filledAmount[takerHash];
         uint256 newTakerFilled = prevTakerFilled + totalTakerAmount;
-        if (newTakerFilled > takerOrder.makerAmount) revert Overfilled();
+        if (newTakerFilled > takerOrder.makerAmount) revert TakerOverfilled();
         filledAmount[takerHash] = newTakerFilled;
 
         // Price constraint for taker order using aggregated actual amounts.
         if (totalMakerAmount * takerOrder.makerAmount < totalTakerAmount * takerOrder.takerAmount) {
-            revert PriceInvalid();
+            revert TakerPriceInvalid();
         }
-
-        emit TradesSettled(msg.sender, takerOrder.maker, length);
     }
 
     /// @notice Computes the EIP-712 struct hash for a SpotOrder.

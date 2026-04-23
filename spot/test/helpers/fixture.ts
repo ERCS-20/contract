@@ -15,6 +15,7 @@ export async function deploySpotSystem() {
     taker,
     relayer,
     claimFeeDao,
+    pauseDao,
   ] = await viem.getWalletClients();
 
   const tokenA = await viem.deployContract("MockERC20", ["TokenA", "TKA"]);
@@ -32,6 +33,7 @@ export async function deploySpotSystem() {
   await vault.write.setTokenWhitelistDAO([whitelistDao.account.address]);
   await vault.write.setWithdrawDAO([withdrawDao.account.address]);
   await vault.write.setClaimFeeDAO([claimFeeDao.account.address]);
+  await (vault.write as any).setPauseDAO([pauseDao.account.address]);
 
   const vaultAsWhitelist = await viem.getContractAt("GlobalSpotVault", vault.address, {
     client: { public: publicClient, wallet: whitelistDao },
@@ -52,6 +54,7 @@ export async function deploySpotSystem() {
     whitelistDao,
     withdrawDao,
     claimFeeDao,
+    pauseDao,
     maker,
     taker,
     relayer,

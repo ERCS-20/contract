@@ -322,4 +322,187 @@ describe("GlobalSpotVault", async function () {
     const ethAfter = await publicClient.getBalance({ address: deployer.account.address });
     assert.ok(ethAfter > ethBefore);
   });
+
+  it("paused vault blocks deposit", async function () {
+    const ctx = await deploySpotSystem();
+    const { viem, publicClient, deployer, pauseDao, tokenA, vault } = ctx;
+
+    await tokenA.write.mint([deployer.account.address, 1_000n]);
+    await tokenA.write.approve([vault.address, 1_000n]);
+
+    const vaultAsPauseDao = await viem.getContractAt("GlobalSpotVault", vault.address, {
+      client: { public: publicClient, wallet: pauseDao },
+    });
+    await (vaultAsPauseDao.write as any).pause();
+
+    const vaultAsUser = await viem.getContractAt("GlobalSpotVault", vault.address, {
+      client: { public: publicClient, wallet: deployer },
+    });
+    await viem.assertions.revertWithCustomError(
+      vaultAsUser.write.deposit([tokenA.address, 1_000n]),
+      vault,
+      "EnforcedPause",
+    );
+  });
+
+  it("paused vault blocks internalTransfer", async function () {
+    const ctx = await deploySpotSystem();
+    const { viem, publicClient, maker, taker, pauseDao, tokenA, exchange, vault } = ctx;
+
+    await tokenA.write.mint([maker.account.address, 10_000n]);
+    await tokenA.write.approve([vault.address, 10_000n], { account: maker.account });
+    const vaultAsMaker = await viem.getContractAt("GlobalSpotVault", vault.address, {
+      client: { public: publicClient, wallet: maker },
+    });
+    await vaultAsMaker.write.deposit([tokenA.address, 10_000n]);
+
+    const vaultAsPauseDao = await viem.getContractAt("GlobalSpotVault", vault.address, {
+      client: { public: publicClient, wallet: pauseDao },
+    });
+    await (vaultAsPauseDao.write as any).pause();
+
+    const testClient = await viem.getTestClient();
+    await testClient.impersonateAccount({ address: exchange.address });
+    await testClient.setBalance({ address: exchange.address, value: 10n ** 18n });
+    const exchangeWallet = await viem.getWalletClient(exchange.address);
+    const vaultImp = await viem.getContractAt("GlobalSpotVault", vault.address, {
+      client: { public: publicClient, wallet: exchangeWallet },
+    });
+    await viem.assertions.revertWithCustomError(
+      vaultImp.write.internalTransfer([
+        maker.account.address,
+        taker.account.address,
+        tokenA.address,
+        1_000n,
+        10n,
+      ]),
+      vault,
+      "EnforcedPause",
+    );
+    await testClient.stopImpersonatingAccount({ address: exchange.address });
+  });
+
+  it("applyExchangeUpdate reverts without pending proposal", async function () {
+    const ctx = await deploySpotSystem();
+    const { viem, vault } = ctx;
+
+    await viem.assertions.revertWithCustomError(
+      vault.write.applyExchangeUpdate(),
+      vault,
+      "NoPendingExchangeUpdate",
+    );
+  });
+
+  it("applyExchangeUpdate reverts before 7-day delay", async function () {
+    const ctx = await deploySpotSystem();
+    const { viem, vault } = ctx;
+
+    const exchange2 = await viem.deployContract("SpotExchange");
+    await vault.write.proposeExchangeUpdate([exchange2.address]);
+
+    await viem.assertions.revertWithCustomError(
+      vault.write.applyExchangeUpdate(),
+      vault,
+      "ExchangeUpdateTooEarly",
+    );
+  });
+
+  it("propose then apply after 7 days updates exchange", async function () {
+    const ctx = await deploySpotSystem();
+    const { viem, publicClient, vault, exchange, maker, taker, tokenA } = ctx;
+
+    const exchange2 = await viem.deployContract("SpotExchange");
+    await exchange2.write.setVault([vault.address]);
+
+    assert.equal(
+      (await vault.read.exchange()).toLowerCase(),
+      exchange.address.toLowerCase(),
+    );
+    await vault.write.proposeExchangeUpdate([exchange2.address]);
+
+    const pending = await vault.read.pendingExchangeUpdate();
+    const [pendingAddr, pendingAt] = pending as readonly [`0x${string}`, bigint];
+    assert.equal(pendingAddr.toLowerCase(), exchange2.address.toLowerCase());
+    assert.ok(pendingAt > 0n);
+
+    const testClient = await viem.getTestClient();
+    await testClient.increaseTime({ seconds: 7 * 24 * 60 * 60 + 1 });
+    await testClient.mine({ blocks: 1 });
+
+    await vault.write.applyExchangeUpdate();
+
+    assert.equal((await vault.read.exchange()).toLowerCase(), exchange2.address.toLowerCase());
+    const cleared = await vault.read.pendingExchangeUpdate();
+    const [clearedAddr, clearedAt] = cleared as readonly [`0x${string}`, bigint];
+    assert.equal(clearedAddr, "0x0000000000000000000000000000000000000000");
+    assert.equal(clearedAt, 0n);
+
+    await tokenA.write.mint([maker.account.address, 1000n]);
+    await tokenA.write.approve([vault.address, 1000n], { account: maker.account });
+    const vaultAsMaker = await viem.getContractAt("GlobalSpotVault", vault.address, {
+      client: { public: publicClient, wallet: maker },
+    });
+    await vaultAsMaker.write.deposit([tokenA.address, 1000n]);
+
+    await testClient.impersonateAccount({ address: exchange.address });
+    await testClient.setBalance({ address: exchange.address, value: 10n ** 18n });
+    const oldExWallet = await viem.getWalletClient(exchange.address);
+    const vaultOld = await viem.getContractAt("GlobalSpotVault", vault.address, {
+      client: { public: publicClient, wallet: oldExWallet },
+    });
+    await viem.assertions.revertWithCustomError(
+      vaultOld.write.internalTransfer([
+        maker.account.address,
+        taker.account.address,
+        tokenA.address,
+        100n,
+        1n,
+      ]),
+      vault,
+      "NotExchange",
+    );
+    await testClient.stopImpersonatingAccount({ address: exchange.address });
+
+    await testClient.impersonateAccount({ address: exchange2.address });
+    await testClient.setBalance({ address: exchange2.address, value: 10n ** 18n });
+    const newExWallet = await viem.getWalletClient(exchange2.address);
+    const vaultNew = await viem.getContractAt("GlobalSpotVault", vault.address, {
+      client: { public: publicClient, wallet: newExWallet },
+    });
+    await vaultNew.write.internalTransfer([
+      maker.account.address,
+      taker.account.address,
+      tokenA.address,
+      100n,
+      1n,
+    ]);
+    await testClient.stopImpersonatingAccount({ address: exchange2.address });
+  });
+
+  it("proposeExchangeUpdate reverts for zero address", async function () {
+    const ctx = await deploySpotSystem();
+    const { viem, vault } = ctx;
+
+    await viem.assertions.revertWithCustomError(
+      vault.write.proposeExchangeUpdate(["0x0000000000000000000000000000000000000000"]),
+      vault,
+      "InvalidAddress",
+    );
+  });
+
+  it("proposeExchangeUpdate reverts when caller is not owner", async function () {
+    const ctx = await deploySpotSystem();
+    const { viem, publicClient, vault, maker } = ctx;
+
+    const exchange2 = await viem.deployContract("SpotExchange");
+    const vaultAsMaker = await viem.getContractAt("GlobalSpotVault", vault.address, {
+      client: { public: publicClient, wallet: maker },
+    });
+
+    await viem.assertions.revertWithCustomError(
+      vaultAsMaker.write.proposeExchangeUpdate([exchange2.address]),
+      vault,
+      "OwnableUnauthorizedAccount",
+    );
+  });
 });

@@ -197,7 +197,7 @@ describe("SpotExchange", async function () {
     );
   });
 
-  it("reverts PriceInvalid when maker fulfillment violates limit price", async function () {
+  it("reverts MakerPriceInvalid when maker fulfillment violates limit price", async function () {
     const ctx = await deploySpotSystem();
     const { viem, publicClient, chainId, maker, taker, relayer, tokenA, tokenB, exchange } = ctx;
 
@@ -240,13 +240,13 @@ describe("SpotExchange", async function () {
         [{ makerAmount: makerAmt, takerAmount: takerAmt - 1n }],
       ]),
       exchange,
-      "PriceInvalid",
+      "MakerPriceInvalid",
     );
   });
 
-  it("reverts PriceInvalid when aggregated fill violates taker limit", async function () {
+  it("reverts TakerPriceInvalid when aggregated fill violates taker limit", async function () {
     const ctx = await deploySpotSystem();
-    const { viem, publicClient, chainId, maker, taker, relayer, tokenA, tokenB, exchange } = ctx;
+    const { viem, publicClient, chainId, maker, taker, relayer, tokenA, tokenB, exchange, vault } = ctx;
 
     const makerAmt = 100n;
     const takerAmt = 150n;
@@ -271,6 +271,21 @@ describe("SpotExchange", async function () {
       expiry,
       salt: 42n,
     };
+
+    await tokenA.write.mint([maker.account.address, makerAmt * 2n]);
+    await tokenB.write.mint([taker.account.address, takerAmt * 2n]);
+    await tokenA.write.approve([vault.address, makerAmt * 2n], { account: maker.account });
+    await tokenB.write.approve([vault.address, takerAmt * 2n], { account: taker.account });
+
+    const vaultMaker = await viem.getContractAt("GlobalSpotVault", vault.address, {
+      client: { public: publicClient, wallet: maker },
+    });
+    const vaultTaker = await viem.getContractAt("GlobalSpotVault", vault.address, {
+      client: { public: publicClient, wallet: taker },
+    });
+    await vaultMaker.write.deposit([tokenA.address, makerAmt * 2n]);
+    await vaultTaker.write.deposit([tokenB.address, takerAmt * 2n]);
+
     const makerSig = await signSpotOrder(maker, chainId, exchange.address, makerOrder);
     const takerSig = await signSpotOrder(taker, chainId, exchange.address, takerOrder);
 
@@ -284,10 +299,10 @@ describe("SpotExchange", async function () {
         takerSig,
         [makerOrder],
         [makerSig],
-        [{ makerAmount: makerAmt, takerAmount: 140n }],
+        [{ makerAmount: 99n, takerAmount: 149n }],
       ]),
       exchange,
-      "PriceInvalid",
+      "TakerPriceInvalid",
     );
   });
 
@@ -338,7 +353,7 @@ describe("SpotExchange", async function () {
     );
   });
 
-  it("reverts Overfilled when cumulated fill exceeds maker order", async function () {
+  it("reverts MakerOverfilled when cumulated fill exceeds maker order", async function () {
     const ctx = await deploySpotSystem();
     const {
       viem,
@@ -409,7 +424,67 @@ describe("SpotExchange", async function () {
     await viem.assertions.revertWithCustomError(
       run(62n, 5000n, 10000n),
       exchange,
-      "Overfilled",
+      "MakerOverfilled",
+    );
+  });
+
+  it("reverts TakerOverfilled when fill exceeds taker makerAmount", async function () {
+    const ctx = await deploySpotSystem();
+    const { viem, publicClient, chainId, maker, taker, relayer, tokenA, tokenB, exchange, vault } = ctx;
+
+    const makerAmt = 10_000n;
+    const takerAmt = 20_000n;
+    const ts = await publicClient.getBlock().then((b) => b.timestamp);
+    const expiry = ts + 3600n;
+
+    await tokenA.write.mint([maker.account.address, makerAmt * 2n]);
+    await tokenB.write.mint([taker.account.address, takerAmt * 2n]);
+    await tokenA.write.approve([vault.address, makerAmt * 2n], { account: maker.account });
+    await tokenB.write.approve([vault.address, takerAmt * 2n], { account: taker.account });
+    const vaultMaker = await viem.getContractAt("GlobalSpotVault", vault.address, {
+      client: { public: publicClient, wallet: maker },
+    });
+    const vaultTaker = await viem.getContractAt("GlobalSpotVault", vault.address, {
+      client: { public: publicClient, wallet: taker },
+    });
+    await vaultMaker.write.deposit([tokenA.address, makerAmt * 2n]);
+    await vaultTaker.write.deposit([tokenB.address, takerAmt * 2n]);
+
+    const makerOrder = {
+      maker: maker.account.address,
+      makerToken: tokenA.address,
+      takerToken: tokenB.address,
+      makerAmount: makerAmt,
+      takerAmount: takerAmt,
+      expiry,
+      salt: 81n,
+    };
+    const takerOrder = {
+      maker: taker.account.address,
+      makerToken: tokenB.address,
+      takerToken: tokenA.address,
+      makerAmount: 11_000n,
+      takerAmount: 5_500n,
+      expiry,
+      salt: 82n,
+    };
+    const makerSig = await signSpotOrder(maker, chainId, exchange.address, makerOrder);
+    const takerSig = await signSpotOrder(taker, chainId, exchange.address, takerOrder);
+
+    const ex = await viem.getContractAt("SpotExchange", exchange.address, {
+      client: { public: publicClient, wallet: relayer },
+    });
+
+    await viem.assertions.revertWithCustomError(
+      ex.write.settleTrades([
+        takerOrder,
+        takerSig,
+        [makerOrder],
+        [makerSig],
+        [{ makerAmount: 6000n, takerAmount: 12_000n }],
+      ]),
+      exchange,
+      "TakerOverfilled",
     );
   });
 

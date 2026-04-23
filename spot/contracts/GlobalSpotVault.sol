@@ -5,6 +5,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /// @dev Minimal interface for WETH-style wrapped tokens (e.g. WUSDC).
@@ -19,12 +20,22 @@ interface IWrappedNativeLike {
 /// - Only the SpotExchange contract is allowed to perform internal transfers between users.
 /// - Withdrawals are authorized off-chain by `withdrawDAO` using EIP-712 signatures.
 /// - Fee claims are triggered and received by `claimFeeDAO`.
-contract GlobalSpotVault is Ownable, ReentrancyGuard {
+contract GlobalSpotVault is Ownable, Pausable, ReentrancyGuard {
     using SafeERC20 for IERC20;
     using ECDSA for bytes32;
 
     /// @notice Address of the SpotExchange contract allowed to call `internalTransfer`.
-    address public immutable exchange;
+    /// @dev May be replaced via `proposeExchangeUpdate` + `applyExchangeUpdate` (7-day delay).
+    address public exchange;
+
+    /// @notice Pending exchange rotation: proposed address and earliest `applyExchangeUpdate` time.
+    struct PendingExchangeUpdate {
+        address pendingExchange;
+        uint256 exchangeActionTimestamp;
+    }
+
+    /// @notice Active pending exchange proposal, if any (`pendingExchange` non-zero).
+    PendingExchangeUpdate public pendingExchangeUpdate;
 
     /// @notice Address of the wrapped USDC token implementing WETH-style deposit/withdraw.
     address public immutable wusdc;
@@ -37,6 +48,9 @@ contract GlobalSpotVault is Ownable, ReentrancyGuard {
 
     /// @notice Address that governs the token whitelist.
     address public tokenWhitelistDAO;
+
+    /// @notice Address allowed to pause/unpause vault operations.
+    address public pauseDAO;
 
     /// @notice Mapping of token => whether it is allowed to be deposited.
     mapping(address => bool) public isAllowedToken;
@@ -62,6 +76,15 @@ contract GlobalSpotVault is Ownable, ReentrancyGuard {
 
     /// @notice Emitted when the claim-fee DAO is updated.
     event ClaimFeeDAOSet(address indexed dao);
+
+    /// @notice Emitted when the pause DAO is updated.
+    event PauseDAOSet(address indexed dao);
+
+    /// @notice Emitted when the owner schedules a new exchange address (executable after delay).
+    event ExchangeUpdateProposed(address indexed proposedExchange, uint256 executableAt);
+
+    /// @notice Emitted when the exchange address is updated after the delay.
+    event ExchangeUpdated(address indexed previousExchange, address indexed newExchange);
 
     /// @notice Emitted when a token is added to the whitelist.
     event AllowedTokenAdded(address indexed token);
@@ -94,6 +117,7 @@ contract GlobalSpotVault is Ownable, ReentrancyGuard {
     error NotTokenWhitelistDAO();
     error NotWithdrawDAO();
     error NotClaimFeeDAO();
+    error NotPauseDAO();
     error TokenNotAllowed();
     error InvalidAddress();
     error InsufficientBalance();
@@ -101,6 +125,8 @@ contract GlobalSpotVault is Ownable, ReentrancyGuard {
     error NoForcedWithdrawalRecord();
     error ForcedWithdrawalTooEarly();
     error PayoutFailed();
+    error NoPendingExchangeUpdate();
+    error ExchangeUpdateTooEarly();
 
     modifier onlyExchange() {
         if (msg.sender != exchange) revert NotExchange();
@@ -117,6 +143,11 @@ contract GlobalSpotVault is Ownable, ReentrancyGuard {
         _;
     }
 
+    modifier onlyPauseDAO() {
+        if (msg.sender != pauseDAO) revert NotPauseDAO();
+        _;
+    }
+
     /// @notice EIP-712 domain separator used for withdrawal signatures.
     bytes32 public immutable DOMAIN_SEPARATOR;
 
@@ -125,8 +156,8 @@ contract GlobalSpotVault is Ownable, ReentrancyGuard {
 
     /// @param _wusdc Address of the WUSDC token (must be non-zero).
     /// @param _exchange Address of the SpotExchange contract (must be non-zero).
-    /// @dev The owner is set to the deployer (`msg.sender`). The exchange address is fixed
-    ///      at construction time and cannot be changed afterwards.
+    /// @dev The owner is set to the deployer (`msg.sender`). The exchange may later be
+    ///      rotated with a 7-day timelock (`proposeExchangeUpdate` / `applyExchangeUpdate`).
     constructor(address _wusdc, address _exchange) Ownable(msg.sender) {
         if (_wusdc == address(0) || _exchange == address(0)) revert InvalidAddress();
         wusdc = _wusdc;
@@ -169,6 +200,48 @@ contract GlobalSpotVault is Ownable, ReentrancyGuard {
         emit TokenWhitelistDAOSet(dao);
     }
 
+    /// @notice Sets the DAO address allowed to pause/unpause vault operations.
+    function setPauseDAO(address dao) external onlyOwner {
+        if (dao == address(0)) revert InvalidAddress();
+        pauseDAO = dao;
+        emit PauseDAOSet(dao);
+    }
+
+    /// @notice Schedules a new SpotExchange address; it becomes applicable after 7 days.
+    /// @dev Owner may call again to replace the pending proposal; the delay restarts from this block.
+    function proposeExchangeUpdate(address newExchange) external onlyOwner {
+        if (newExchange == address(0)) revert InvalidAddress();
+        uint256 executableAt = block.timestamp + 7 days;
+        pendingExchangeUpdate = PendingExchangeUpdate({
+            pendingExchange: newExchange,
+            exchangeActionTimestamp: executableAt
+        });
+        emit ExchangeUpdateProposed(newExchange, executableAt);
+    }
+
+    /// @notice Applies the pending exchange address after the timelock has passed.
+    function applyExchangeUpdate() external onlyOwner {
+        PendingExchangeUpdate memory p = pendingExchangeUpdate;
+        if (p.pendingExchange == address(0)) revert NoPendingExchangeUpdate();
+        if (block.timestamp < p.exchangeActionTimestamp) revert ExchangeUpdateTooEarly();
+
+        address previous = exchange;
+        exchange = p.pendingExchange;
+        pendingExchangeUpdate = PendingExchangeUpdate(address(0), 0);
+
+        emit ExchangeUpdated(previous, exchange);
+    }
+
+    /// @notice Pauses deposit and settlement balance movements.
+    function pause() external onlyPauseDAO {
+        _pause();
+    }
+
+    /// @notice Unpauses deposit and settlement balance movements.
+    function unpause() external onlyPauseDAO {
+        _unpause();
+    }
+
     /// @notice Adds a token to the deposit whitelist.
     function addAllowedToken(address token) external onlyTokenWhitelistDAO {
         if (token == address(0)) revert InvalidAddress();
@@ -184,7 +257,7 @@ contract GlobalSpotVault is Ownable, ReentrancyGuard {
 
     /// @notice Deposits tokens into the vault, increasing the caller's balance.
     /// @dev For USDC, the frontend should wrap to WUSDC before calling this function.
-    function deposit(address token, uint256 amount) external {
+    function deposit(address token, uint256 amount) external whenNotPaused {
         if (!isAllowedToken[token]) revert TokenNotAllowed();
         if (amount == 0) return;
 
@@ -260,7 +333,7 @@ contract GlobalSpotVault is Ownable, ReentrancyGuard {
         address token,
         uint256 amount,
         uint256 fee
-    ) external onlyExchange {
+    ) external onlyExchange whenNotPaused {
         uint256 total = amount + fee;
         if (balances[from][token] < total) revert InsufficientBalance();
 
