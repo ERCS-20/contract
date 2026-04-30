@@ -82,6 +82,7 @@ export async function signSpotOrder(
 
 const withdrawTypes = {
   Withdraw: [
+    { name: "user", type: "address" },
     { name: "orderId", type: "uint256" },
     { name: "token", type: "address" },
     { name: "amount", type: "uint256" },
@@ -92,7 +93,7 @@ export async function signWithdraw(
   signer: WalletClient,
   chainId: number,
   verifyingContract: Address,
-  message: { orderId: bigint; token: Address; amount: bigint },
+  message: { user: Address; orderId: bigint; token: Address; amount: bigint },
 ): Promise<`0x${string}`> {
   return signer.signTypedData({
     domain: {

@@ -67,6 +67,7 @@ describe("GlobalSpotVault", async function () {
     await vaultAsUser.write.deposit([tokenA.address, amount * 2n]);
 
     const sig = await signWithdraw(withdrawDao, chainId, vault.address, {
+      user: deployer.account.address,
       orderId: 1n,
       token: tokenA.address,
       amount,
@@ -105,6 +106,7 @@ describe("GlobalSpotVault", async function () {
     await vaultAsUser.write.deposit([tokenA.address, amount * 3n]);
 
     const sig = await signWithdraw(withdrawDao, chainId, vault.address, {
+      user: deployer.account.address,
       orderId: 42n,
       token: tokenA.address,
       amount,
@@ -112,6 +114,7 @@ describe("GlobalSpotVault", async function () {
     await vaultAsUser.write.withdraw([42n, tokenA.address, amount, sig]);
 
     const sig2 = await signWithdraw(withdrawDao, chainId, vault.address, {
+      user: deployer.account.address,
       orderId: 42n,
       token: tokenA.address,
       amount,
@@ -120,6 +123,39 @@ describe("GlobalSpotVault", async function () {
       vaultAsUser.write.withdraw([42n, tokenA.address, amount, sig2]),
       vault,
       "WithdrawOrderAlreadyUsed",
+    );
+  });
+
+  it("withdraw reverts when signature is reused by another user", async function () {
+    const ctx = await deploySpotSystem();
+    const { viem, publicClient, chainId, deployer, taker, withdrawDao, tokenA, vault } = ctx;
+
+    const amount = 2_000n * 10n ** 18n;
+    await tokenA.write.mint([deployer.account.address, amount]);
+    await tokenA.write.mint([taker.account.address, amount]);
+    await tokenA.write.approve([vault.address, amount], { account: deployer.account });
+    await tokenA.write.approve([vault.address, amount], { account: taker.account });
+
+    const vaultAsDeployer = await viem.getContractAt("GlobalSpotVault", vault.address, {
+      client: { public: publicClient, wallet: deployer },
+    });
+    const vaultAsTaker = await viem.getContractAt("GlobalSpotVault", vault.address, {
+      client: { public: publicClient, wallet: taker },
+    });
+    await vaultAsDeployer.write.deposit([tokenA.address, amount]);
+    await vaultAsTaker.write.deposit([tokenA.address, amount]);
+
+    const sigForDeployer = await signWithdraw(withdrawDao, chainId, vault.address, {
+      user: deployer.account.address,
+      orderId: 77n,
+      token: tokenA.address,
+      amount,
+    });
+
+    await viem.assertions.revertWithCustomError(
+      vaultAsTaker.write.withdraw([77n, tokenA.address, amount, sigForDeployer]),
+      vault,
+      "NotWithdrawDAO",
     );
   });
 
@@ -312,6 +348,7 @@ describe("GlobalSpotVault", async function () {
     await vaultAsUser.write.deposit([wusdc.address, wrapAmount]);
 
     const sig = await signWithdraw(withdrawDao, chainId, vault.address, {
+      user: deployer.account.address,
       orderId: 99n,
       token: wusdc.address,
       amount: wrapAmount,

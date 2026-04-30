@@ -152,7 +152,7 @@ contract GlobalSpotVault is Ownable, Pausable, ReentrancyGuard {
     bytes32 public immutable DOMAIN_SEPARATOR;
 
     /// @notice Typehash for the EIP-712 Withdraw struct.
-    bytes32 public constant WITHDRAW_TYPEHASH = keccak256("Withdraw(uint256 orderId,address token,uint256 amount)");
+    bytes32 public constant WITHDRAW_TYPEHASH = keccak256("Withdraw(address user,uint256 orderId,address token,uint256 amount)");
 
     /// @param _wusdc Address of the WUSDC token (must be non-zero).
     /// @param _exchange Address of the SpotExchange contract (must be non-zero).
@@ -283,7 +283,7 @@ contract GlobalSpotVault is Ownable, Pausable, ReentrancyGuard {
         if (balances[msg.sender][token] < amount) revert InsufficientBalance();
 
         // Verify EIP-712 signature from `withdrawDAO` authorizing this withdrawal.
-        bytes32 structHash = keccak256(abi.encode(WITHDRAW_TYPEHASH, orderId, token, amount));
+        bytes32 structHash = keccak256(abi.encode(WITHDRAW_TYPEHASH, msg.sender, orderId, token, amount));
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash));
 
         address recovered = digest.recover(signature);

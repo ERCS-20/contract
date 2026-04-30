@@ -114,7 +114,7 @@ contract SpotExchange is Ownable {
         );
     }
 
-    /// @notice Sets the GlobalSpotVault address (one-time action).
+    /// @notice Sets the GlobalSpotVault address. 
     /// @dev Needed to avoid deployment-time circular dependency with the vault constructor.
     function setVault(address vault_) external onlyOwner {
         vault = IGlobalSpotVault(vault_);
