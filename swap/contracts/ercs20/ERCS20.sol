@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-pragma solidity ^0.8.0;
+pragma solidity 0.8.18;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
@@ -37,7 +37,6 @@ contract ERCS20 is Ownable, ReentrancyGuard, IERCS20, ERC20 {
     /// @param _usdcAmount Initial quote-side reserve used as pricing seed.
     constructor(string memory _name, string memory _symbol, uint256 totalSupply, uint256 _usdcAmount) ERC20(_name, _symbol) {
         ercs20Amount = totalSupply;
-        
         usdcSeedAmount = _usdcAmount;
         usdAmount = _usdcAmount;
 
@@ -114,9 +113,7 @@ contract ERCS20 is Ownable, ReentrancyGuard, IERCS20, ERC20 {
     function buy(uint256 amountInMin, uint256 deadline) public payable virtual override {
         _requireDeadline(deadline);
         require(msg.value > 0, "ERCS20: AMOUNT_IN_ERROR");
-
         (uint256 amountOut, uint256 fee) = getAmountOut(msg.value, true);
-
         require(amountOut >= amountInMin, "ERCS20: INSUFFICIENT_OUTPUT_AMOUNT");
 
         ercs20Amount -= (amountOut+fee);
@@ -141,22 +138,17 @@ contract ERCS20 is Ownable, ReentrancyGuard, IERCS20, ERC20 {
     /// @param deadline Latest valid block timestamp for this transaction (`type(uint256).max` = no check).
     function sell(uint256 amountOut, uint256 amountInMin, uint256 deadline) external virtual override {
         _requireDeadline(deadline);
-        uint256 balance = _msgSender().balance;
+        (uint256 quoteOut, ) = getAmountOut(amountOut, false);
+        require(quoteOut >= amountInMin, "ERCS20: INSUFFICIENT_OUTPUT_AMOUNT");
 
         _transfer(_msgSender(), address(this), amountOut);
-
-        uint256 amountIn = _msgSender().balance - balance;
-
-        require(amountIn >= amountInMin, "ERCS20: INSUFFICIENT_OUTPUT_AMOUNT");
     }
 
     /// @notice Withdraws accumulated protocol fees (quote asset and token-side dust).
     /// @dev Callable only by `withdrawAddr`.
     function withdrawFee() external {
         require(withdrawAddr != address(0), "ERCS20: WITHDRAW_ADDR_ERROR");
-
         TransferHelper.safeTransferETH(withdrawAddr, (address(this).balance+usdcSeedAmount-usdAmount));
-
         TransferHelper.safeTransfer(address(this), withdrawAddr, (balanceOf(address(this))-ercs20Amount));
     }
 
