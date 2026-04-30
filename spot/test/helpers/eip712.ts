@@ -12,6 +12,7 @@ const spotOrderTypes = {
     { name: "takerAmount", type: "uint256" },
     { name: "expiry", type: "uint256" },
     { name: "salt", type: "uint256" },
+    { name: "timeInForce", type: "uint8" },
   ],
 } as const;
 
@@ -23,6 +24,7 @@ export type SpotOrderMessage = {
   takerAmount: bigint;
   expiry: bigint;
   salt: bigint;
+  timeInForce: number;
 };
 
 /// @dev Matches `SpotExchange._hashOrder` (`abi.encode` of struct fields, then `keccak256`).
@@ -41,6 +43,7 @@ export function hashSpotOrderStruct(
         { type: "uint256" },
         { type: "uint256" },
         { type: "uint256" },
+        { type: "uint8" },
       ],
       [
         spotOrderTypehash,
@@ -51,6 +54,7 @@ export function hashSpotOrderStruct(
         order.takerAmount,
         order.expiry,
         order.salt,
+        order.timeInForce,
       ],
     ),
   );

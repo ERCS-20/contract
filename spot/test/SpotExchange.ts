@@ -38,6 +38,7 @@ describe("SpotExchange", async function () {
       takerAmount: takerAmt,
       expiry,
       salt: 1n,
+      timeInForce: 1,
     };
     const takerOrder = {
       maker: taker.account.address,
@@ -47,6 +48,7 @@ describe("SpotExchange", async function () {
       takerAmount: makerAmt,
       expiry,
       salt: 2n,
+      timeInForce: 1,
     };
 
     const makerSig = await signSpotOrder(maker, chainId, exchange.address, makerOrder);
@@ -121,6 +123,7 @@ describe("SpotExchange", async function () {
       takerAmount: takerAmt,
       expiry,
       salt: 11n,
+      timeInForce: 1,
     };
     const takerOrder = {
       maker: taker.account.address,
@@ -130,6 +133,7 @@ describe("SpotExchange", async function () {
       takerAmount: makerAmt,
       expiry,
       salt: 12n,
+      timeInForce: 1,
     };
     const makerSig = await signSpotOrder(maker, chainId, exchange.address, makerOrder);
     const takerSig = await signSpotOrder(taker, chainId, exchange.address, takerOrder);
@@ -167,6 +171,7 @@ describe("SpotExchange", async function () {
       takerAmount: takerAmt,
       expiry,
       salt: 21n,
+      timeInForce: 1,
     };
     const takerOrder = {
       maker: taker.account.address,
@@ -176,6 +181,7 @@ describe("SpotExchange", async function () {
       takerAmount: makerAmt,
       expiry,
       salt: 22n,
+      timeInForce: 1,
     };
     const makerSig = await signSpotOrder(maker, chainId, exchange.address, makerOrder);
     const takerSig = await signSpotOrder(taker, chainId, exchange.address, takerOrder);
@@ -214,6 +220,7 @@ describe("SpotExchange", async function () {
       takerAmount: takerAmt,
       expiry,
       salt: 31n,
+      timeInForce: 1,
     };
     const takerOrder = {
       maker: taker.account.address,
@@ -223,6 +230,7 @@ describe("SpotExchange", async function () {
       takerAmount: makerAmt,
       expiry,
       salt: 32n,
+      timeInForce: 1,
     };
     const makerSig = await signSpotOrder(maker, chainId, exchange.address, makerOrder);
     const takerSig = await signSpotOrder(taker, chainId, exchange.address, takerOrder);
@@ -261,6 +269,7 @@ describe("SpotExchange", async function () {
       takerAmount: takerAmt,
       expiry,
       salt: 41n,
+      timeInForce: 1,
     };
     const takerOrder = {
       maker: taker.account.address,
@@ -270,6 +279,7 @@ describe("SpotExchange", async function () {
       takerAmount: makerAmt,
       expiry,
       salt: 42n,
+      timeInForce: 1,
     };
 
     await tokenA.write.mint([maker.account.address, makerAmt * 2n]);
@@ -323,6 +333,7 @@ describe("SpotExchange", async function () {
       takerAmount: takerAmt,
       expiry,
       salt: 43n,
+      timeInForce: 1,
     };
     const takerOrder = {
       maker: taker.account.address,
@@ -332,6 +343,7 @@ describe("SpotExchange", async function () {
       takerAmount: makerAmt,
       expiry,
       salt: 44n,
+      timeInForce: 1,
     };
     const makerSig = await signSpotOrder(maker, chainId, exchange.address, makerOrder);
     const takerSig = await signSpotOrder(taker, chainId, exchange.address, takerOrder);
@@ -394,6 +406,7 @@ describe("SpotExchange", async function () {
       takerAmount: takerAmt,
       expiry,
       salt: 51n,
+      timeInForce: 1,
     };
     const makerSig = await signSpotOrder(maker, chainId, exchange.address, makerOrder);
     const ex = await viem.getContractAt("SpotExchange", exchange.address, {
@@ -409,6 +422,7 @@ describe("SpotExchange", async function () {
         takerAmount: fillA,
         expiry,
         salt: takerSalt,
+        timeInForce: 1,
       };
       const takerSig = await signSpotOrder(taker, chainId, exchange.address, takerOrder);
       await ex.write.settleTrades([
@@ -458,6 +472,7 @@ describe("SpotExchange", async function () {
       takerAmount: takerAmt,
       expiry,
       salt: 81n,
+      timeInForce: 1,
     };
     const takerOrder = {
       maker: taker.account.address,
@@ -467,6 +482,7 @@ describe("SpotExchange", async function () {
       takerAmount: 5_500n,
       expiry,
       salt: 82n,
+      timeInForce: 1,
     };
     const makerSig = await signSpotOrder(maker, chainId, exchange.address, makerOrder);
     const takerSig = await signSpotOrder(taker, chainId, exchange.address, takerOrder);
@@ -529,6 +545,7 @@ describe("SpotExchange", async function () {
       takerAmount: takerAmt,
       expiry,
       salt: 71n,
+      timeInForce: 1,
     };
     const makerSig = await signSpotOrder(maker, chainId, exchange.address, makerOrder);
     const ex = await viem.getContractAt("SpotExchange", exchange.address, {
@@ -546,6 +563,7 @@ describe("SpotExchange", async function () {
         takerAmount: halfA,
         expiry,
         salt,
+        timeInForce: 1,
       };
       const takerSig = await signSpotOrder(taker, chainId, exchange.address, takerOrder);
       await ex.write.settleTrades([

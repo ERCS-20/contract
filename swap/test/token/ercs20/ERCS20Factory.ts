@@ -7,7 +7,7 @@ const totalSupply = ethers.parseUnits("100000000000", 18);
 const usdcAmount = ethers.parseUnits("10000000", 18);
 
 const pairCreatedIface = new ethers.Interface([
-    "event PairCreated(address indexed,address indexed,address,uint256)",
+    "event PairCreated(address indexed, address indexed, address, uint256)",
 ]);
 
 /** Parses `PairCreated` from `factory.create` receipt (emitted in ERCS20 constructor). */
@@ -20,8 +20,9 @@ function getPairCreatedFromReceipt(receipt: TransactionReceipt): { tokenAddress:
             });
             if (parsed !== null && parsed.name === "PairCreated") {
                 const r = parsed.args;
+                const ercs20Address = r[0];
                 const indexArg = r[r.length - 1];
-                return { tokenAddress: log.address, index: BigInt(String(indexArg)) };
+                return { tokenAddress: ercs20Address, index: BigInt(String(indexArg)) };
             }
         } catch {
             /* not PairCreated */

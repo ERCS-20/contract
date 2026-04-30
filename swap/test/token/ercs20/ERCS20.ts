@@ -30,7 +30,7 @@ describe("ERCS20", function() {
 
     async function createFixture() {
 
-        const ercs20 = await ethers.deployContract("ERCS20", [name, symbol, totalSupply, usdcAmount, 0]);
+        const ercs20 = await ethers.deployContract("ERCS20", [name, symbol, totalSupply, usdcAmount]);
     
         return {ercs20};
     }

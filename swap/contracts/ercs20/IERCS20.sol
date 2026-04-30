@@ -7,13 +7,6 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 /// @notice Interface for the ERCS20 stock token standard with AMM-style swap behavior.
 interface IERCS20 is IERC20 {
 
-    /// @notice Emitted when a new ERCS20 pair-like token contract is initialized.
-    /// @param ercs20 The ERCS20 token address.
-    /// @param usdc Placeholder quote token address emitted for compatibility.
-    /// @param pair Pair/contract address (the ERCS20 contract itself).
-    /// @param index Sequential index assigned by the factory/creator.
-    event PairCreated(address indexed ercs20, address indexed usdc, address pair, uint256 index);
-
     /// @notice Emitted when tracked reserves are updated.
     /// @param totalErcs20 Current token-side tracked reserve.
     /// @param totalUsdc Current quote-side tracked reserve.

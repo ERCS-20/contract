@@ -23,10 +23,12 @@ contract ERCS20Factory is Pausable, Ownable {
     /// @notice Maps symbol string to the ERCS20 token address created for that symbol (zero if unused).
     mapping(string => address) public symbols;
 
-    /// @notice Emitted when a new ERCS20 token contract is created.
+    /// @notice Emitted when a new ERCS20 pair-like token contract is initialized.
     /// @param ercs20 The ERCS20 token address.
+    /// @param usdc Placeholder quote token address emitted for compatibility.
+    /// @param pair Pair/contract address (the ERCS20 contract itself).
     /// @param index Sequential index assigned by the factory/creator.
-    event Create(address indexed ercs20, uint256 index);
+    event PairCreated(address indexed ercs20, address indexed usdc, address pair, uint256 index);
 
     /// @notice Deploys a new ERCS20 token contract and transfers its ownership.
     /// @param name ERC20 name for the new token.
@@ -38,12 +40,12 @@ contract ERCS20Factory is Pausable, Ownable {
 
         require(symbols[symbol] == address(0), "ERCS20Factory: SYMBOL_EXISTS");
 
-        ERCS20 ercs20 = new ERCS20(name, symbol, totalSupply, usdcAmount, index++);
+        ERCS20 ercs20 = new ERCS20(name, symbol, totalSupply, usdcAmount);
         symbols[symbol] = address(ercs20);
         ercs20.transferOwnership(newOwner);
         ercs20s[address(ercs20)] = true;
 
-        emit Create(address(ercs20), index-1);
+        emit PairCreated(address(ercs20), address(0xFFfFfFffFFfffFFfFFfFFFFFffFFFffffFfFFFfF), address(ercs20), index++);
     }
 
     /// @notice Pauses factory creation operations.

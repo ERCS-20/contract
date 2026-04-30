@@ -27,7 +27,7 @@ contract SpotExchange is Ownable {
     bytes32 public immutable DOMAIN_SEPARATOR;
 
     /// @notice Typehash for the SpotOrder struct.
-    bytes32 public constant SPOT_ORDER_TYPEHASH = keccak256("SpotOrder(address maker,address makerToken,address takerToken,uint256 makerAmount,uint256 takerAmount,uint256 expiry,uint256 salt)");
+    bytes32 public constant SPOT_ORDER_TYPEHASH = keccak256("SpotOrder(address maker,address makerToken,address takerToken,uint256 makerAmount,uint256 takerAmount,uint256 expiry,uint256 salt,uint8 timeInForce)");
 
     /// @notice Fee rate constants: 0.2% = 20 / 10000.
     uint256 public constant FEE_NUMERATOR = 20;
@@ -85,6 +85,7 @@ contract SpotExchange is Ownable {
         uint256 takerAmount;
         uint256 expiry;
         uint256 salt;
+        uint8 timeInForce;
     }
 
     struct Fulfillment {
@@ -250,7 +251,8 @@ contract SpotExchange is Ownable {
                     order.makerAmount,
                     order.takerAmount,
                     order.expiry,
-                    order.salt
+                    order.salt,
+                    order.timeInForce
                 )
             );
     }

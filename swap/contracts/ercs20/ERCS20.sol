@@ -35,8 +35,7 @@ contract ERCS20 is Ownable, ReentrancyGuard, IERCS20, ERC20 {
     /// @param _symbol ERC20 token symbol.
     /// @param totalSupply Initial token supply minted to this contract.
     /// @param _usdcAmount Initial quote-side reserve used as pricing seed.
-    /// @param index External index emitted in `PairCreated` for factory-level tracking.
-    constructor(string memory _name, string memory _symbol, uint256 totalSupply, uint256 _usdcAmount, uint256 index) ERC20(_name, _symbol) {
+    constructor(string memory _name, string memory _symbol, uint256 totalSupply, uint256 _usdcAmount) ERC20(_name, _symbol) {
         ercs20Amount = totalSupply;
         
         usdcSeedAmount = _usdcAmount;
@@ -44,7 +43,6 @@ contract ERCS20 is Ownable, ReentrancyGuard, IERCS20, ERC20 {
 
         _mint(address(this), totalSupply);
 
-        emit PairCreated(address(this), address(0xFFfFfFffFFfffFFfFFfFFFFFffFFFffffFfFFFfF), address(this), index);
         emit Sync(uint112(totalSupply), uint112(_usdcAmount));
     }
 
