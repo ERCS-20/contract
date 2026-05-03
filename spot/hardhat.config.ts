@@ -28,6 +28,21 @@ export default defineConfig({
     },
   },
   networks: {
+    /**
+     * Backing chain for `npx hardhat node` (JSON-RPC on port 8545 by default).
+     * Optional overrides: `npx hardhat node --network hardhatMainnet` etc.
+     */
+    node: {
+      type: "edr-simulated",
+      chainType: "l1",
+    },
+    /** Connect scripts/tests to a running local node: `npx hardhat run ... --network localhost` */
+    localhost: {
+      type: "http",
+      chainType: "l1",
+      url: "http://127.0.0.1:8545",
+      accounts: "remote",
+    },
     hardhatMainnet: {
       type: "edr-simulated",
       chainType: "l1",
