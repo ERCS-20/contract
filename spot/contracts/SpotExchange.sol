@@ -89,8 +89,16 @@ contract SpotExchange is Ownable {
     }
 
     struct Fulfillment {
-        uint256 makerAmount;
         uint256 takerAmount;
+        uint256 makerAmount;
+    }
+
+    struct TradeSettlement {
+        SpotOrder takerOrder;
+        bytes takerSignature;
+        SpotOrder[] makerOrders;
+        bytes[] makerSignatures;
+        Fulfillment[] fulfillments;
     }
 
     modifier onlyAllowedKey() {
@@ -133,18 +141,28 @@ contract SpotExchange is Ownable {
         emit DAORemoved(addr);
     }
 
+    function settleTradesBatch(TradeSettlement[] calldata settlements) external onlyAllowedKey {
+        uint256 length = settlements.length;
+        for (uint256 i; i < length; ) {
+            _settleTrades(settlements[i].takerOrder, settlements[i].takerSignature, settlements[i].makerOrders, settlements[i].makerSignatures, settlements[i].fulfillments);
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
     /// @notice Settles a batch of trades between one taker order and multiple maker orders.
     /// @dev
     /// - Verifies EIP-712 signatures for taker and each maker.
     /// - Enforces price constraints and non-overfilling per order hash.
     /// - Computes fees for both sides and calls the vault for transfers.
-    function settleTrades(
+    function _settleTrades(
         SpotOrder calldata takerOrder,
         bytes calldata takerSignature,
         SpotOrder[] calldata makerOrders,
         bytes[] calldata makerSignatures,
         Fulfillment[] calldata fulfillments
-    ) external onlyAllowedKey {
+    ) internal {
         uint256 length = makerOrders.length;
         require(length == makerSignatures.length && length == fulfillments.length,"length mismatch");
 

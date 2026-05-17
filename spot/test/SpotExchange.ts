@@ -2,10 +2,30 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { deploySpotSystem } from "./helpers/fixture.js";
-import { hashSpotOrderStruct, signSpotOrder } from "./helpers/eip712.js";
+import { hashSpotOrderStruct, signSpotOrder, type SpotOrderMessage } from "./helpers/eip712.js";
+
+type Fulfillment = { makerAmount: bigint; takerAmount: bigint };
+
+function oneSettlementBatch(
+  takerOrder: SpotOrderMessage,
+  takerSignature: `0x${string}`,
+  makerOrders: SpotOrderMessage[],
+  makerSignatures: `0x${string}`[],
+  fulfillments: Fulfillment[],
+) {
+  return [
+    {
+      takerOrder,
+      takerSignature,
+      makerOrders,
+      makerSignatures,
+      fulfillments,
+    },
+  ];
+}
 
 describe("SpotExchange", async function () {
-  it("settleTrades moves vault balances and accrues fees", async function () {
+  it("settleTradesBatch moves vault balances and accrues fees", async function () {
     const { viem, publicClient, chainId, maker, taker, relayer, tokenA, tokenB, exchange, vault } =
       await deploySpotSystem();
 
@@ -64,12 +84,10 @@ describe("SpotExchange", async function () {
     const makerOrderHash = hashSpotOrderStruct(typeHash, makerOrder);
     const takerOrderHash = hashSpotOrderStruct(typeHash, takerOrder);
     const fromBlock = await publicClient.getBlockNumber();
-    await ex.write.settleTrades([
-      takerOrder,
-      takerSig,
-      [makerOrder],
-      [makerSig],
-      [{ makerAmount: makerAmt, takerAmount: takerAmt }],
+    await ex.write.settleTradesBatch([
+      oneSettlementBatch(takerOrder, takerSig, [makerOrder], [makerSig], [
+        { makerAmount: makerAmt, takerAmount: takerAmt },
+      ]),
     ]);
     const events = await publicClient.getContractEvents({
       address: exchange.address,
@@ -105,7 +123,7 @@ describe("SpotExchange", async function () {
     assert.equal(await vault.read.tokenFees([tokenB.address]), makerFee);
   });
 
-  it("reverts settleTrades when caller is not an allowed key", async function () {
+  it("reverts settleTradesBatch when caller is not an allowed key", async function () {
     const ctx = await deploySpotSystem();
     const { viem, publicClient, chainId, maker, taker, tokenA, tokenB, exchange } = ctx;
 
@@ -143,12 +161,10 @@ describe("SpotExchange", async function () {
     });
 
     await viem.assertions.revertWithCustomError(
-      exAsTaker.write.settleTrades([
-        takerOrder,
-        takerSig,
-        [makerOrder],
-        [makerSig],
-        [{ makerAmount: makerAmt, takerAmount: takerAmt }],
+      exAsTaker.write.settleTradesBatch([
+        oneSettlementBatch(takerOrder, takerSig, [makerOrder], [makerSig], [
+          { makerAmount: makerAmt, takerAmount: takerAmt },
+        ]),
       ]),
       exchange,
       "NotAllowedKey",
@@ -191,12 +207,10 @@ describe("SpotExchange", async function () {
     });
 
     await viem.assertions.revertWithCustomError(
-      ex.write.settleTrades([
-        takerOrder,
-        takerSig,
-        [makerOrder],
-        [makerSig],
-        [{ makerAmount: makerAmt, takerAmount: takerAmt }],
+      ex.write.settleTradesBatch([
+        oneSettlementBatch(takerOrder, takerSig, [makerOrder], [makerSig], [
+          { makerAmount: makerAmt, takerAmount: takerAmt },
+        ]),
       ]),
       exchange,
       "OrderExpired",
@@ -240,12 +254,10 @@ describe("SpotExchange", async function () {
     });
 
     await viem.assertions.revertWithCustomError(
-      ex.write.settleTrades([
-        takerOrder,
-        takerSig,
-        [makerOrder],
-        [makerSig],
-        [{ makerAmount: makerAmt, takerAmount: takerAmt - 1n }],
+      ex.write.settleTradesBatch([
+        oneSettlementBatch(takerOrder, takerSig, [makerOrder], [makerSig], [
+          { makerAmount: makerAmt, takerAmount: takerAmt - 1n },
+        ]),
       ]),
       exchange,
       "MakerPriceInvalid",
@@ -304,12 +316,10 @@ describe("SpotExchange", async function () {
     });
 
     await viem.assertions.revertWithCustomError(
-      ex.write.settleTrades([
-        takerOrder,
-        takerSig,
-        [makerOrder],
-        [makerSig],
-        [{ makerAmount: 99n, takerAmount: 149n }],
+      ex.write.settleTradesBatch([
+        oneSettlementBatch(takerOrder, takerSig, [makerOrder], [makerSig], [
+          { makerAmount: 99n, takerAmount: 149n },
+        ]),
       ]),
       exchange,
       "TakerPriceInvalid",
@@ -353,12 +363,10 @@ describe("SpotExchange", async function () {
     });
 
     await viem.assertions.revertWithCustomError(
-      ex.write.settleTrades([
-        takerOrder,
-        takerSig,
-        [makerOrder],
-        [makerSig],
-        [{ makerAmount: makerAmt, takerAmount: takerAmt }],
+      ex.write.settleTradesBatch([
+        oneSettlementBatch(takerOrder, takerSig, [makerOrder], [makerSig], [
+          { makerAmount: makerAmt, takerAmount: takerAmt },
+        ]),
       ]),
       exchange,
       "TokenPairMismatch",
@@ -425,12 +433,10 @@ describe("SpotExchange", async function () {
         timeInForce: 1,
       };
       const takerSig = await signSpotOrder(taker, chainId, exchange.address, takerOrder);
-      await ex.write.settleTrades([
-        takerOrder,
-        takerSig,
-        [makerOrder],
-        [makerSig],
-        [{ makerAmount: fillA, takerAmount: fillB }],
+      await ex.write.settleTradesBatch([
+        oneSettlementBatch(takerOrder, takerSig, [makerOrder], [makerSig], [
+          { makerAmount: fillA, takerAmount: fillB },
+        ]),
       ]);
     };
 
@@ -492,12 +498,10 @@ describe("SpotExchange", async function () {
     });
 
     await viem.assertions.revertWithCustomError(
-      ex.write.settleTrades([
-        takerOrder,
-        takerSig,
-        [makerOrder],
-        [makerSig],
-        [{ makerAmount: 6000n, takerAmount: 12_000n }],
+      ex.write.settleTradesBatch([
+        oneSettlementBatch(takerOrder, takerSig, [makerOrder], [makerSig], [
+          { makerAmount: 6000n, takerAmount: 12_000n },
+        ]),
       ]),
       exchange,
       "TakerOverfilled",
@@ -566,12 +570,10 @@ describe("SpotExchange", async function () {
         timeInForce: 1,
       };
       const takerSig = await signSpotOrder(taker, chainId, exchange.address, takerOrder);
-      await ex.write.settleTrades([
-        takerOrder,
-        takerSig,
-        [makerOrder],
-        [makerSig],
-        [{ makerAmount: halfA, takerAmount: halfB }],
+      await ex.write.settleTradesBatch([
+        oneSettlementBatch(takerOrder, takerSig, [makerOrder], [makerSig], [
+          { makerAmount: halfA, takerAmount: halfB },
+        ]),
       ]);
     };
 
