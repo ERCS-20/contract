@@ -161,6 +161,8 @@ contract GlobalSpotVault is Ownable, Pausable, ReentrancyGuard {
     constructor(address _wusdc, address _exchange) Ownable(msg.sender) {
         if (_wusdc == address(0) || _exchange == address(0)) revert InvalidAddress();
         wusdc = _wusdc;
+        isAllowedToken[_wusdc] = true;
+        emit AllowedTokenAdded(_wusdc);
         exchange = _exchange;
 
         uint256 chainId;
@@ -243,7 +245,7 @@ contract GlobalSpotVault is Ownable, Pausable, ReentrancyGuard {
     }
 
     /// @notice Adds a token to the deposit whitelist.
-    function addAllowedToken(address token) external onlyTokenWhitelistDAO {
+    function addAllowedToken(address token) public onlyTokenWhitelistDAO {
         if (token == address(0)) revert InvalidAddress();
         isAllowedToken[token] = true;
         emit AllowedTokenAdded(token);
