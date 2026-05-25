@@ -13,11 +13,15 @@ import type { Address } from "viem";
 async function main() {
   const { viem } = await network.connect();
 
+  const ercs20Factory = "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512";
+  const orbix = "0xCafac3dD18aC6c6e92c921884f9E4176737C052c";
+
   const weth9 = await viem.deployContract("WETH9", []);
   console.log("WETH9 (vault weth9 stand-in):", weth9.address);
 
   const exchange = await viem.deployContract("SpotExchange");
   console.log("SpotExchange:", exchange.address);
+  await exchange.write.addDAO(["0x70997970C51812dc3A010C7d01b50e0d17dc79C8"]);
 
   const vault = await viem.deployContract("GlobalSpotVault", [weth9.address, exchange.address]);
   console.log("GlobalSpotVault:", vault.address);
@@ -25,7 +29,14 @@ async function main() {
   await exchange.write.setVault([vault.address]);
   console.log("SpotExchange.setVault applied");
 
-  const tx = await exchange.write.addDAO(["0x8626f6940E2eb28930eFb4CeF49B2d1F2C9C1199"]);
+  const pairFactory = await viem.deployContract("SpotPairFactory", [ercs20Factory, vault.address]);
+  await pairFactory.write.setPairDAO(["0x70997970C51812dc3A010C7d01b50e0d17dc79C8"]);
+
+  await vault.write.setTokenWhitelistDAO([pairFactory.address]);
+
+  await pairFactory.write.create([orbix]);
+
+  console.log("SpotPairFactory:", pairFactory.address);
 }
 
 main().catch((err) => {

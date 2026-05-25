@@ -1,6 +1,5 @@
 import "@nomicfoundation/hardhat-toolbox";
 import * as dotenv from "dotenv";
-import { HDNodeWallet } from "ethers";
 import { HardhatUserConfig } from "hardhat/config";
 
 dotenv.config();
@@ -18,7 +17,7 @@ const config: HardhatUserConfig = {
   },
   defaultNetwork: "hardhat_local",
   networks: {
-    hardhat_local: {
+    local_host: {
       chainId: 31337,
       mining: {
         auto: false,
