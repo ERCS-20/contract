@@ -27,11 +27,7 @@ contract SpotPairFactory is Ownable {
     mapping(bytes32 => bool) public spotPairs;
 
     /// @notice Emitted when a new spot pair is registered.
-    event SpotPairCreated(
-        address indexed baseToken,
-        address indexed quoteToken,
-        uint256 indexed pairIndex
-    );
+    event SpotPairCreated(address indexed baseToken, address indexed quoteToken, uint256 indexed pairIndex);
 
     /// @notice Emitted when the DAO address is updated.
     event PairDAOSet(address indexed pairDAO);
