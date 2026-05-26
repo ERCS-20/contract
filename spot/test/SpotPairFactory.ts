@@ -27,13 +27,14 @@ describe("SpotPairFactory", async function () {
     return { ...ctx, mockFactory, pairFactory, publicClient, viem, deployer };
   }
 
+  /** Default seed: scaled opening price = 1e15 (0.001 quote per token). */
   async function registerErcs20(
     viem: Awaited<ReturnType<typeof deploySpotSystem>>["viem"],
     mockFactory: Awaited<ReturnType<typeof deployPairFactory>>["mockFactory"],
-    name: string,
-    symbol: string,
+    usdcSeed = 1n * 10n ** 15n,
+    totalSupply = 1n * 10n ** 18n,
   ) {
-    const token = await viem.deployContract("MockERC20", [name, symbol]);
+    const token = await viem.deployContract("MockERCS20WithSeed", [usdcSeed, totalSupply]);
     await mockFactory.write.setERCS20([token.address, true]);
     return token;
   }
@@ -172,7 +173,7 @@ describe("SpotPairFactory", async function () {
     const { viem, publicClient, mockFactory, pairFactory, vault, wusdc } =
       await deployPairFactory();
 
-    const ercs20 = await registerErcs20(viem, mockFactory, "Acme Corp", "ACME");
+    const ercs20 = await registerErcs20(viem, mockFactory);
 
     const fromBlock = await publicClient.getBlockNumber();
     await pairFactory.write.create([ercs20.address]);
@@ -200,7 +201,7 @@ describe("SpotPairFactory", async function () {
     const { viem, publicClient, mockFactory, pairFactory, taker, wusdc } =
       await deployPairFactory();
 
-    const ercs20 = await registerErcs20(viem, mockFactory, "Public", "PUB");
+    const ercs20 = await registerErcs20(viem, mockFactory);
     const pairFactoryAsTaker = await viem.getContractAt("SpotPairFactory", pairFactory.address, {
       client: { public: publicClient, wallet: taker },
     });
@@ -212,8 +213,8 @@ describe("SpotPairFactory", async function () {
   it("create(baseToken) increments pairIndex across multiple pairs", async function () {
     const { viem, publicClient, mockFactory, pairFactory } = await deployPairFactory();
 
-    const acme = await registerErcs20(viem, mockFactory, "Acme", "ACME");
-    const beta = await registerErcs20(viem, mockFactory, "Beta", "BETA");
+    const acme = await registerErcs20(viem, mockFactory);
+    const beta = await registerErcs20(viem, mockFactory, 5n * 10n ** 15n, 1n * 10n ** 18n);
 
     const fromBlock = await publicClient.getBlockNumber();
     await pairFactory.write.create([acme.address]);
@@ -259,7 +260,7 @@ describe("SpotPairFactory", async function () {
   it("create(baseToken) reverts when pair already exists", async function () {
     const { viem, mockFactory, pairFactory } = await deployPairFactory();
 
-    const ercs20 = await registerErcs20(viem, mockFactory, "Dup", "DUP");
+    const ercs20 = await registerErcs20(viem, mockFactory);
     await pairFactory.write.create([ercs20.address]);
 
     await viem.assertions.revertWithCustomError(
@@ -274,7 +275,7 @@ describe("SpotPairFactory", async function () {
       wireVaultWhitelist: false,
     });
 
-    const ercs20 = await registerErcs20(viem, mockFactory, "NoVault", "NV");
+    const ercs20 = await registerErcs20(viem, mockFactory);
 
     await viem.assertions.revertWithCustomError(
       pairFactory.write.create([ercs20.address]),
@@ -395,13 +396,112 @@ describe("SpotPairFactory", async function () {
     assert.equal(await pairFactory.read.isPair([tokenA.address, tokenB.address]), false);
   });
 
+  it("create(baseToken) reverts when opening price exceeds 1e16", async function () {
+    const { viem, mockFactory, pairFactory } = await deployPairFactory();
+
+    const tooHigh = await registerErcs20(viem, mockFactory, 2n * 10n ** 16n, 1n * 10n ** 18n);
+    await viem.assertions.revertWithCustomError(
+      pairFactory.write.create([tooHigh.address]),
+      pairFactory,
+      "OpeningPriceTooHigh",
+    );
+  });
+
+  it("create(baseToken) accepts opening price exactly at 1e16", async function () {
+    const { pairFactory, viem, mockFactory } = await deployPairFactory();
+
+    const atMax = await registerErcs20(viem, mockFactory, 1n * 10n ** 16n, 1n * 10n ** 18n);
+    await pairFactory.write.create([atMax.address]);
+    assert.equal(await pairFactory.read.pairCount(), 1n);
+  });
+
+  it("create(baseToken) reverts when opening price is smaller than 1e-18", async function () {
+    const { viem, mockFactory, pairFactory } = await deployPairFactory();
+
+    const tooSmall = await registerErcs20(viem, mockFactory, 1n, 10n ** 19n);
+    await viem.assertions.revertWithCustomError(
+      pairFactory.write.create([tooSmall.address]),
+      pairFactory,
+      "OpeningPriceDecimalsTooHigh",
+    );
+  });
+
+  it("create(baseToken) reverts when totalSupply is zero", async function () {
+    const { viem, mockFactory, pairFactory } = await deployPairFactory();
+
+    const zeroSupply = await registerErcs20(viem, mockFactory, 1n, 0n);
+    await viem.assertions.revertWithCustomError(
+      pairFactory.write.create([zeroSupply.address]),
+      pairFactory,
+      "InvalidOpeningPrice",
+    );
+  });
+
+  it("create(baseToken) allows zero usdcSeedAmount", async function () {
+    const { pairFactory, viem, mockFactory, wusdc } = await deployPairFactory();
+
+    const zeroSeed = await registerErcs20(viem, mockFactory, 0n, 1n * 10n ** 18n);
+    await pairFactory.write.create([zeroSeed.address]);
+    assert.equal(await pairFactory.read.isPair([zeroSeed.address, wusdc.address]), true);
+  });
+
+  it("pairDAO create does not validate opening price for ERCS20 base", async function () {
+    const { viem, mockFactory, pairFactory, tokenB, deployer } = await deployPairFactory();
+
+    const invalidForSingleCreate = await registerErcs20(
+      viem,
+      mockFactory,
+      2n * 10n ** 16n,
+      1n * 10n ** 18n,
+    );
+
+    await viem.assertions.revertWithCustomError(
+      pairFactory.write.create([invalidForSingleCreate.address]),
+      pairFactory,
+      "OpeningPriceTooHigh",
+    );
+
+    await pairFactory.write.setPairDAO([deployer.account.address]);
+    await pairFactory.write.create([invalidForSingleCreate.address, tokenB.address]);
+
+    assert.equal(
+      await pairFactory.read.isPair([invalidForSingleCreate.address, tokenB.address]),
+      true,
+    );
+  });
+
+  it("pairDAO create does not validate opening price even when quote is WUSDC", async function () {
+    const { viem, mockFactory, pairFactory, wusdc, deployer } = await deployPairFactory();
+
+    const tooHigh = await registerErcs20(viem, mockFactory, 2n * 10n ** 16n, 1n * 10n ** 18n);
+
+    await viem.assertions.revertWithCustomError(
+      pairFactory.write.create([tooHigh.address]),
+      pairFactory,
+      "OpeningPriceTooHigh",
+    );
+
+    await pairFactory.write.setPairDAO([deployer.account.address]);
+    await pairFactory.write.create([tooHigh.address, wusdc.address]);
+
+    assert.equal(await pairFactory.read.isPair([tooHigh.address, wusdc.address]), true);
+  });
+
+  it("pairDAO create skips opening price check for non-ERCS20 base", async function () {
+    const { pairFactory, tokenA, tokenB, deployer } = await deployPairFactory();
+
+    await pairFactory.write.setPairDAO([deployer.account.address]);
+    await pairFactory.write.create([tokenA.address, tokenB.address]);
+    assert.equal(await pairFactory.read.isPair([tokenA.address, tokenB.address]), true);
+  });
+
   it("mixed create paths share the same pairCount sequence", async function () {
     const { viem, publicClient, mockFactory, pairFactory, tokenA, tokenB, deployer, wusdc } =
       await deployPairFactory();
 
     await pairFactory.write.setPairDAO([deployer.account.address]);
 
-    const ercs20 = await registerErcs20(viem, mockFactory, "Mixed", "MIX");
+    const ercs20 = await registerErcs20(viem, mockFactory);
     const fromBlock = await publicClient.getBlockNumber();
 
     await pairFactory.write.create([ercs20.address]);

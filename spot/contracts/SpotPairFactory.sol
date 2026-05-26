@@ -2,6 +2,7 @@
 pragma solidity 0.8.28;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 interface IERCS20Factory {
     function ercs20s(address token) external view returns (bool);
@@ -10,6 +11,11 @@ interface IERCS20Factory {
 interface IGlobalSpotVault {
     function addAllowedToken(address token) external;
     function wusdc() external view returns (address);
+}
+
+interface IERCS20 {
+    function usdcSeedAmount() external view returns (uint256);
+    function totalSupply() external view returns (uint256);
 }
 
 /// @title SpotPairFactory
@@ -35,11 +41,17 @@ contract SpotPairFactory is Ownable {
     /// @notice Emitted when the DAO address is removed.
     event PairDAORemoved(address indexed pairDAO);
 
+    uint256 private constant OPENING_PRICE_SCALE = 1e18;
+    uint256 private constant MAX_OPENING_PRICE = 1e16;
+
     error NotERCS20();
     error NotPairDAO();
     error PairAlreadyExists();
     error InvalidAddress();
     error WusdcMismatch();
+    error InvalidOpeningPrice();
+    error OpeningPriceDecimalsTooHigh();
+    error OpeningPriceTooHigh();
 
     modifier onlyPairDAO() {
         if (msg.sender != pairDAO) revert NotPairDAO();
@@ -78,6 +90,7 @@ contract SpotPairFactory is Ownable {
     function create(address baseToken) external {
         if (baseToken == address(0)) revert InvalidAddress();
         if (!ercs20Factory.ercs20s(baseToken)) revert NotERCS20();
+        _validateErcs20OpeningPrice(baseToken);
         _registerPair(baseToken, vault.wusdc());
     }
 
@@ -116,5 +129,19 @@ contract SpotPairFactory is Ownable {
 
         spotPairs[key] = true;
         emit SpotPairCreated(baseToken, quoteToken, pairCount++);
+    }
+
+    /// @dev Opening price = `usdcSeedAmount / totalSupply` (18-decimal fixed point) must be in (0, 1e16].
+    function _validateErcs20OpeningPrice(address baseToken) internal view {
+        IERCS20 ercs20 = IERCS20(baseToken);
+        uint256 usdcSeed = ercs20.usdcSeedAmount();
+        uint256 supply = ercs20.totalSupply();
+        if (supply == 0) revert InvalidOpeningPrice();
+
+        if (usdcSeed == 0) return;
+
+        uint256 scaled = Math.mulDiv(usdcSeed, OPENING_PRICE_SCALE, supply);
+        if (scaled == 0) revert OpeningPriceDecimalsTooHigh();
+        if (scaled > MAX_OPENING_PRICE) revert OpeningPriceTooHigh();
     }
 }

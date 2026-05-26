@@ -21,6 +21,9 @@ interface IERCS20 is IERC20 {
     /// @param to Final recipient of output asset.
     event Swap(address indexed sender, uint256 ercs20AmountIn, uint256 usdcAmountIn, uint256 ercs20AmountOut, uint256 usdcAmountOut, address indexed to);
 
+    /// @notice Returns the initial quote-side seed amount configured at deployment (USDC-chain native asset).
+    function usdcSeedAmount() external view returns (uint256);
+
     /// @notice Returns current tracked reserves used by pricing logic.
     /// @return tokenReserve Token-side reserve.
     /// @return quoteReserve Quote-side reserve.
