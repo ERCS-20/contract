@@ -10,6 +10,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 
 /// @dev Minimal interface for WETH-style wrapped tokens (e.g. WUSDC).
 interface IWrappedNativeLike {
+    function deposit() external payable;
     function withdraw(uint256 amount) external;
 }
 
@@ -258,7 +259,7 @@ contract GlobalSpotVault is Ownable, Pausable, ReentrancyGuard {
     }
 
     /// @notice Deposits tokens into the vault, increasing the caller's balance.
-    /// @dev For USDC, the frontend should wrap to WUSDC before calling this function.
+    /// @dev For ERC20 deposits. Native USDC on ARC should use `depositUSDC` instead.
     function deposit(address token, uint256 amount) external whenNotPaused {
         if (!isAllowedToken[token]) revert TokenNotAllowed();
         if (amount == 0) return;
@@ -267,6 +268,17 @@ contract GlobalSpotVault is Ownable, Pausable, ReentrancyGuard {
         balances[msg.sender][token] += amount;
 
         emit Deposited(msg.sender, token, amount);
+    }
+
+    /// @notice Deposits native USDC (ARC gas token), wraps to WUSDC, and credits the caller.
+    function depositUSDC() external payable whenNotPaused {
+        uint256 amount = msg.value;
+        if (amount == 0) return;
+
+        IWrappedNativeLike(wusdc).deposit{value: amount}();
+        balances[msg.sender][wusdc] += amount;
+
+        emit Deposited(msg.sender, wusdc, amount);
     }
 
     /// @notice Withdraws tokens from the vault using an off-chain EIP-712 authorization.

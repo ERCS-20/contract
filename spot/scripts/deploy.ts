@@ -31,12 +31,14 @@ async function main() {
 
   const pairFactory = await viem.deployContract("SpotPairFactory", [ercs20Factory, vault.address]);
   await pairFactory.write.setPairDAO(["0x70997970C51812dc3A010C7d01b50e0d17dc79C8"]);
+  console.log("SpotPairFactory:", pairFactory.address);
 
   await vault.write.setTokenWhitelistDAO([pairFactory.address]);
+  await vault.write.setWithdrawDAO(["0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"]);
 
   await pairFactory.write.create([orbix]);
 
-  console.log("SpotPairFactory:", pairFactory.address);
+  
 }
 
 main().catch((err) => {

@@ -15,7 +15,7 @@ const config: HardhatUserConfig = {
       viaIR: true
     }
   },
-  defaultNetwork: "hardhat_local",
+  defaultNetwork: "local_host",
   networks: {
     local_host: {
       chainId: 31337,

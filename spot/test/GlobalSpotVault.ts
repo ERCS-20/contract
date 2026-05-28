@@ -360,6 +360,40 @@ describe("GlobalSpotVault", async function () {
     assert.ok(ethAfter > ethBefore);
   });
 
+  it("depositUSDC wraps native USDC and credits WUSDC balance", async function () {
+    const ctx = await deploySpotSystem();
+    const { viem, publicClient, deployer, wusdc, vault } = ctx;
+
+    const amount = 5n * 10n ** 18n;
+    const vaultAsUser = await viem.getContractAt("GlobalSpotVault", vault.address, {
+      client: { public: publicClient, wallet: deployer },
+    });
+
+    await vaultAsUser.write.depositUSDC({ value: amount });
+
+    assert.equal(await vault.read.balances([deployer.account.address, wusdc.address]), amount);
+    assert.equal(await wusdc.read.balanceOf([vault.address]), amount);
+  });
+
+  it("paused vault blocks depositUSDC", async function () {
+    const ctx = await deploySpotSystem();
+    const { viem, publicClient, deployer, pauseDao, vault } = ctx;
+
+    const vaultAsPauseDao = await viem.getContractAt("GlobalSpotVault", vault.address, {
+      client: { public: publicClient, wallet: pauseDao },
+    });
+    await (vaultAsPauseDao.write as any).pause();
+
+    const vaultAsUser = await viem.getContractAt("GlobalSpotVault", vault.address, {
+      client: { public: publicClient, wallet: deployer },
+    });
+    await viem.assertions.revertWithCustomError(
+      vaultAsUser.write.depositUSDC({ value: 1_000n }),
+      vault,
+      "EnforcedPause",
+    );
+  });
+
   it("paused vault blocks deposit", async function () {
     const ctx = await deploySpotSystem();
     const { viem, publicClient, deployer, pauseDao, tokenA, vault } = ctx;
