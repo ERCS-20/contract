@@ -24,7 +24,7 @@ async function main() {
   const publicClient = await viem.getPublicClient();
   const [wallet] = await viem.getWalletClients();
 
-  const usdcBuyAmount = parseEther("10");
+  const usdcBuyAmount = parseEther("100");
   const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
   const amountInMin = 0n;
 
@@ -47,14 +47,7 @@ async function main() {
   const bought = balanceAfterBuy - balanceBefore;
   console.log("OBX received from buy:", bought.toString());
 
-  const depositAmount = parseEther("10");
-
-  if (depositAmount === 0n) {
-    throw new Error("Nothing to deposit: OBX balance is zero");
-  }
-  if (depositAmount > balanceAfterBuy) {
-    throw new Error(`DEPOSIT_AMOUNT exceeds OBX balance: ${depositAmount} > ${balanceAfterBuy}`);
-  }
+  const depositAmount = balanceAfterBuy-balanceBefore;
 
   console.log("Approving vault for OBX:", depositAmount.toString());
   const approveHash = await orbix.write.approve([VAULT_ADDRESS, maxUint256]);
@@ -67,7 +60,7 @@ async function main() {
   const vaultBalance = await vault.read.balances([wallet.account.address, ORBIX_ADDRESS]);
   console.log("Vault OBX balance:", vaultBalance.toString());
 
-  const depositUSDCTx = await vault.write.depositUSDC({ value: parseEther("10") });
+  const depositUSDCTx = await vault.write.depositUSDC({ value: parseEther("100") });
   console.log("depositUSDC tx:", depositUSDCTx);
 
 }
