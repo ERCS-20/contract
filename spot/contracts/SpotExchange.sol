@@ -203,19 +203,19 @@ contract SpotExchange is Ownable {
             totalMakerAmount += f.makerAmount;
             totalTakerAmount += f.takerAmount;
 
-            // Maker fee: on takerToken they receive.
-            uint256 makerFee = (f.takerAmount * FEE_NUMERATOR) / FEE_DENOMINATOR;
+            // Taker fee: on takerToken they receive.
+            uint256 takerFee = (f.takerAmount * FEE_NUMERATOR) / FEE_DENOMINATOR;
 
-            // Taker fee: on makerToken they receive.
-            uint256 takerFee = (f.makerAmount * FEE_NUMERATOR) / FEE_DENOMINATOR;
+            // Maker fee: on makerToken they receive.
+            uint256 makerFee = (f.makerAmount * FEE_NUMERATOR) / FEE_DENOMINATOR;
 
             // Maker gives makerToken to taker.
             vault.internalTransfer(
                 makerOrder.maker,
                 takerOrder.maker,
                 makerOrder.makerToken,
-                f.makerAmount - takerFee,
-                takerFee
+                f.makerAmount - makerFee,
+                makerFee
             );
 
             // Taker gives takerToken to maker.
@@ -223,8 +223,8 @@ contract SpotExchange is Ownable {
                 takerOrder.maker,
                 makerOrder.maker,
                 takerOrder.makerToken,
-                f.takerAmount - makerFee,
-                makerFee
+                f.takerAmount - takerFee,
+                takerFee
             );
 
             emit TradeExecuted(

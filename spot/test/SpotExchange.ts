@@ -78,8 +78,8 @@ describe("SpotExchange", async function () {
       client: { public: publicClient, wallet: relayer },
     });
 
-    const makerFee = (takerAmt * 20n) / 10_000n;
-    const takerFee = (makerAmt * 20n) / 10_000n;
+    const takerFee = (takerAmt * 20n) / 10_000n;
+    const makerFee = (makerAmt * 20n) / 10_000n;
     const typeHash = await exchange.read.SPOT_ORDER_TYPEHASH();
     const makerOrderHash = hashSpotOrderStruct(typeHash, makerOrder);
     const takerOrderHash = hashSpotOrderStruct(typeHash, takerOrder);
@@ -110,17 +110,11 @@ describe("SpotExchange", async function () {
     assert.equal(evt.takerFee, takerFee);
 
     assert.equal(await vault.read.balances([maker.account.address, tokenA.address]), makerAmt);
-    assert.equal(
-      await vault.read.balances([maker.account.address, tokenB.address]),
-      takerAmt - makerFee,
-    );
-    assert.equal(
-      await vault.read.balances([taker.account.address, tokenA.address]),
-      makerAmt - takerFee,
-    );
+    assert.equal(await vault.read.balances([maker.account.address, tokenB.address]),takerAmt - takerFee);
+    assert.equal(await vault.read.balances([taker.account.address, tokenA.address]), makerAmt - makerFee);
     assert.equal(await vault.read.balances([taker.account.address, tokenB.address]), takerAmt);
-    assert.equal(await vault.read.tokenFees([tokenA.address]), takerFee);
-    assert.equal(await vault.read.tokenFees([tokenB.address]), makerFee);
+    assert.equal(await vault.read.tokenFees([tokenA.address]), makerFee);
+    assert.equal(await vault.read.tokenFees([tokenB.address]), takerFee);
   });
 
   it("reverts settleTradesBatch when caller is not an allowed key", async function () {
