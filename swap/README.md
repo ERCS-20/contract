@@ -40,6 +40,8 @@ If you use the configured **`hardhat_local`** network (see `hardhat.config.ts`),
 ```bash
 npm install
 npx hardhat compile
+
+anvil --host 0.0.0.0
 ```
 
 ---
