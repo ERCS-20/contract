@@ -14,6 +14,7 @@ interface IGlobalSpotVault {
 }
 
 interface IERCS20 {
+    function owner() external view returns (address);
     function usdcSeedAmount() external view returns (uint256);
     function totalSupply() external view returns (uint256);
 }
@@ -45,6 +46,8 @@ contract SpotPairFactory is Ownable {
     uint256 private constant MAX_OPENING_PRICE = 1e16;
 
     error NotERCS20();
+    /// @dev Only the ERCS20 token owner may call single-argument `create`.
+    error NotTokenOwner();
     error NotPairDAO();
     error PairAlreadyExists();
     error InvalidAddress();
@@ -90,6 +93,7 @@ contract SpotPairFactory is Ownable {
     function create(address baseToken) external {
         if (baseToken == address(0)) revert InvalidAddress();
         if (!ercs20Factory.ercs20s(baseToken)) revert NotERCS20();
+        if (IERCS20(baseToken).owner() != msg.sender) revert NotTokenOwner();
         _validateErcs20OpeningPrice(baseToken);
         _registerPair(baseToken, vault.wusdc());
     }
@@ -136,9 +140,7 @@ contract SpotPairFactory is Ownable {
         IERCS20 ercs20 = IERCS20(baseToken);
         uint256 usdcSeed = ercs20.usdcSeedAmount();
         uint256 supply = ercs20.totalSupply();
-        if (supply == 0) revert InvalidOpeningPrice();
-
-        if (usdcSeed == 0) return;
+        if (supply == 0 || usdcSeed == 0) return;
 
         uint256 scaled = Math.mulDiv(usdcSeed, OPENING_PRICE_SCALE, supply);
         if (scaled == 0) revert OpeningPriceDecimalsTooHigh();

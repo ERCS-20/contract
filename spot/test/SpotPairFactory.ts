@@ -197,17 +197,19 @@ describe("SpotPairFactory", async function () {
     assert.equal(evt.pairIndex, 0n);
   });
 
-  it("create(baseToken) can be called by any address", async function () {
-    const { viem, publicClient, mockFactory, pairFactory, taker, wusdc } =
-      await deployPairFactory();
+  it("create(baseToken) reverts when caller is not token owner", async function () {
+    const { viem, publicClient, mockFactory, pairFactory, taker } = await deployPairFactory();
 
     const ercs20 = await registerErcs20(viem, mockFactory);
     const pairFactoryAsTaker = await viem.getContractAt("SpotPairFactory", pairFactory.address, {
       client: { public: publicClient, wallet: taker },
     });
 
-    await pairFactoryAsTaker.write.create([ercs20.address]);
-    assert.equal(await pairFactory.read.isPair([ercs20.address, wusdc.address]), true);
+    await viem.assertions.revertWithCustomError(
+      pairFactoryAsTaker.write.create([ercs20.address]),
+      pairFactory,
+      "NotTokenOwner",
+    );
   });
 
   it("create(baseToken) increments pairIndex across multiple pairs", async function () {
@@ -426,15 +428,12 @@ describe("SpotPairFactory", async function () {
     );
   });
 
-  it("create(baseToken) reverts when totalSupply is zero", async function () {
-    const { viem, mockFactory, pairFactory } = await deployPairFactory();
+  it("create(baseToken) allows zero totalSupply", async function () {
+    const { pairFactory, viem, mockFactory, wusdc } = await deployPairFactory();
 
     const zeroSupply = await registerErcs20(viem, mockFactory, 1n, 0n);
-    await viem.assertions.revertWithCustomError(
-      pairFactory.write.create([zeroSupply.address]),
-      pairFactory,
-      "InvalidOpeningPrice",
-    );
+    await pairFactory.write.create([zeroSupply.address]);
+    assert.equal(await pairFactory.read.isPair([zeroSupply.address, wusdc.address]), true);
   });
 
   it("create(baseToken) allows zero usdcSeedAmount", async function () {
