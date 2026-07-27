@@ -1,3 +1,15 @@
+# IDE
+.idea/
+*.iml
+.vscode
+!.vscode/settings.json
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
 # Dependencies
 node_modules/
 
