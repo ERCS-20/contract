@@ -1,57 +1,170 @@
-# Sample Hardhat 3 Project (`node:test` and `viem`)
+# Perps Settlement（设计草稿）
 
-This project showcases a Hardhat 3 project using the native Node.js test runner (`node:test`) and the `viem` library for Ethereum interactions.
+链下撮合、链上结算。**不做 ZK。**
 
-To learn more about Hardhat 3, please visit the [Getting Started guide](https://hardhat.org/docs/getting-started#getting-started-with-hardhat-3). To share your feedback, join our [Hardhat 3](https://hardhat.org/hardhat3-telegram-group) Telegram group or [open an issue](https://github.com/NomicFoundation/hardhat/issues/new) in our GitHub issue tracker.
+主路径与主流永续交易所同构，差别是状态与规则放在链上可核验：
 
-## Project Overview
-
-This example project includes:
-
-- A simple Hardhat configuration file.
-- Foundry-compatible Solidity unit tests.
-- TypeScript integration tests using [`node:test`](nodejs.org/api/test.html), the new Node.js native test runner, and [`viem`](https://viem.sh/).
-- Examples demonstrating how to connect to different types of networks, including locally simulating OP mainnet.
-
-## Usage
-
-### Running Tests
-
-To run all the tests in the project, execute the following command:
-
-```shell
-npx hardhat test
+```text
+强平 → 系统账户接仓（剩余保证金注入系统账户）
+     → 系统账户权益充足则正常兑付
+     → 权益触及阈值 → 对赢方 ADL（强制结算/减仓）
 ```
 
-You can also selectively run the Solidity or `node:test` tests:
+| 量 | 在哪 | 作用 |
+|----|------|------|
+| 用户仓位 / 保证金 | **链上** | 防篡改；结算与强平对照 |
+| **系统账户 S**（每市场） | **链上** | 合并原「兑付缓冲 + 接仓敞口」；类似 CEX 保险基金，但可持仓 |
+| S 权益 / 现金分项 | 链上可读 | 健康度；触线 ADL 的输入 |
+| MCR / Claim | **不做** | 已放弃；用 S 权益 + ADL 代替 |
 
-```shell
-npx hardhat test solidity
-npx hardhat test nodejs
+**交易者说明：** [`docs/TRADER_SETTLEMENT_GUIDE.md`](./docs/TRADER_SETTLEMENT_GUIDE.md)  
+**待决问题：** [`docs/DEV_OPEN_QUESTIONS.md`](./docs/DEV_OPEN_QUESTIONS.md)  
+**dYdX V1 对照：** [`docs/REF_DYDX_PERPETUAL_V1.md`](./docs/REF_DYDX_PERPETUAL_V1.md)
+
+---
+
+## 0. 北极星
+
+1. **经济流程对齐 CEX**：保险基金式缓冲 + 强平接盘 + 触线 ADL。  
+2. **透明**：系统账户权益与接仓仓位链上可见，不是黑箱基金。  
+3. **可运行**：无 ZK；仓位明文上链；`AllowedKeys` + 用户订单验签。  
+4. **简单**：不引入 Claim 欠条；不维护独立 MCR 结算路径。
+
+曾讨论过的 PP / Claim / MCR 拆分 → **已收敛并废弃**，见文末「演进说明」。
+
+---
+
+## 1. 系统账户 S（每市场一个）
+
+### 1.1 是什么
+
+每个 `marketId` 一个协议账户 \(S\)：
+
+- **现金**：强平剩余保证金、清算罚金、可选手续费/资金费注入、自愿注资等  
+- **仓位**：仅强平路径转入的协议库存（\(Q^{\mathrm{proto}}\)）  
+- **权益**（展示/风控）：现金 ± 仓位盯市盈亏  
+
+对外可叫「保险基金账户」或「系统账户」；**进账科目与 CEX 保险基金同类**，但允许持仓，且链上可查。
+
+### 1.2 强平怎么进 S（已决倾向）
+
+```text
+用户 B 被强平：
+  1) B 的剩余 margin → 全部注入该市场 S 的现金
+  2) B 的仓位记录（size / side / entryPrice）→ owner 改为 S
+     （仓位字段可保留，margin 占用按规则清零或不再跟用户占用）
+  3) 不引入外部清算人接仓（v0）；接仓方 = 系统
 ```
 
-### Make a deployment to Sepolia
+之后 S 可在市场上按正常成交减仓；盈亏直接进 S 权益。
 
-This project includes an example Ignition module to deploy the contract. You can deploy this module to a locally simulated chain or to Sepolia.
+### 1.3 盈利兑付
 
-To run the deployment to a local chain:
+用户盈利平仓 / 提盈：从 **S 的可兑付能力** 支付（具体是「现金」还是「权益」阈值，待 B3/实现时钉死；v0 建议优先看现金，权益用于 ADL 触发）。
 
-```shell
-npx hardhat ignition deploy ignition/modules/Counter.ts
+- **不做 Claim**：付得出就按规则付；系统触线则走 ADL，而不是开欠条。  
+- 可保留「先平先结算」：S 仍宽裕时先走的人优先拿满；触线后对剩余赢方强制结算。
+
+### 1.4 触线 ADL（已决）
+
+定义（每市场）：
+
+```text
+S 权益 = 现金 ± 接仓盯市盈亏
+
+链上只存固定阈值 adlEquityThreshold（USDC 计量的绝对数）
+ADL 触发：当前权益 ≤ adlEquityThreshold
 ```
 
-To run the deployment to Sepolia, you need an account with funds to send the transaction. The provided Hardhat configuration includes a Configuration Variable called `SEPOLIA_PRIVATE_KEY`, which you can use to set the private key of the account you want to use.
+**8% 不在合约里每次动态算**（相对峰值/占比容易扯皮、也不好验）。  
+改为：
 
-You can set the `SEPOLIA_PRIVATE_KEY` variable using the `hardhat-keystore` plugin or by setting it as an environment variable.
+1. 治理 / 运营按当时 **总金额的 8%** 算出一个固定阈值（「总金额」v0 建议取该市场 **S 当前权益**，或书面定为「S 现金 + 约定口径」）；  
+2. 调用合约 `setAdlEquityThreshold(marketId, value)` 写入；  
+3. 合约执行时只做：`equity <= adlEquityThreshold`。
 
-To set the `SEPOLIA_PRIVATE_KEY` config variable using `hardhat-keystore`:
+总金额变化后若要维持约 8%，由运营 **重新计算并更新** 固定阈值，而不是链上自动按比例漂移。
 
-```shell
-npx hardhat keystore set SEPOLIA_PRIVATE_KEY
+触发后：
+
+1. 停止继续恶化敞口的路径（限开仓等，引擎侧）；  
+2. 对 **赢方 / 高风险贡献仓位** 执行 ADL 或强制与 S 结算；  
+3. 与 CEX「保险基金耗尽 → ADL」同构。
+
+用户单笔兑付仍可能受 **可用现金** 约束；ADL 触线以 **权益 vs 固定阈值** 为准。
+
+---
+
+## 2. 链上 / 链下分工（已决）
+
+```text
+链下撮合引擎
+  ├─ 撮合、强平判定、组装批次
+  ├─ 监控 S 权益，触发 ADL 批次
+  └─ 资金费等（是否上链执行见待决）
+
+链上合约
+  ├─ 用户：仓位 + 保证金（统一账户，多 marketId）
+  ├─ 每市场系统账户 S：现金 + 协议仓位
+  ├─ AllowedKeys + 用户订单 EIP-712（普通成交）
+  ├─ 强平 / ADL：operator 提交，不验被强平/被 ADL 用户订单签
+  └─ 独立 Perps 金库（不共用 Spot GlobalSpotVault）
 ```
 
-After setting the variable, you can run the deployment with the Sepolia network:
+---
 
-```shell
-npx hardhat ignition deploy --network sepolia ignition/modules/Counter.ts
-```
+## 3. 已决架构摘要
+
+| 项 | 结论 |
+|----|------|
+| ZK | 不做 |
+| 仓位 | 链上 |
+| 成交记账 | **引擎报 fill，合约校验后改余额**（A4=C；非链上自算独立 C） |
+| 结算权限 | AllowedKeys + 用户订单验签（开放提交暂缓） |
+| 金库 | 独立 Perps；与 Spot 隔离 |
+| 市场 | 单合约多 `marketId`；用户侧 cross-margin（多 pair 共用保证金） |
+| 抵押 | 仅 USDC |
+| 兑付缓冲 | **每市场系统账户 S**（不再单独维护 PP/Claim） |
+| 强平接仓 | **系统 S**（v0） |
+| 不足时 | **触线 ADL：权益 ≤ 固定阈值**（设阈值时按总金额约 8%），无 Claim |
+| MCR | **不作为协议组件**；可选展示 S 权益即可 |
+
+---
+
+## 4. 会计核对（强平后）
+
+用户侧可 \(Q_L^{\mathrm{user}} \neq Q_S^{\mathrm{user}}\)。  
+差额由 \(S\) 持仓补上：
+
+\[
+Q_L^{\mathrm{user}} + Q_L^{S} = Q_S^{\mathrm{user}} + Q_S^{S}
+\]
+
+普通开平仓仍配对；**仅强平（及 ADL 与 S 对敲）改变 S 的仓位。**
+
+---
+
+## 5. 待确认（写合约前）
+
+详见 [`docs/DEV_OPEN_QUESTIONS.md`](./docs/DEV_OPEN_QUESTIONS.md)。优先：
+
+1. ~~S 触线~~（**已决：权益 ≤ 固定阈值 `adlEquityThreshold`**；阈值由运营按总金额约 8% 设入合约）  
+2. ADL 排序规则（盈利率 / 杠杆 / 仓位大小）  
+3. ~~盈利 C 谁算~~（**已决 A4=C**：引擎 fill + 链上校验）  
+4. 充提 / 强提（B2）  
+5. v0 指令集裁剪（C1 / F）
+
+---
+
+## 6. 演进说明（为何从 PP/Claim/MCR 收回来）
+
+讨论结论：若接仓方定义为系统、缓冲与接仓合并、不够时强制赢方结算，则经济闭环与 **CEX 保险基金 + ADL** 相同；再拆 PP、Claim、MCR 增加复杂度，却不改变尾部数学。
+
+保留的差异化：**链上可见的系统账户 + 明文仓位结算**，而不是另一套欠条经济学。
+
+---
+
+## 7. 一句话
+
+**每市场一个系统账户：强平把钱和仓接进来；够就兑付，快没了就 ADL。**  
+流程同交易所；账本在链上。

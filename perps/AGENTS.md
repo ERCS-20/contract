@@ -10,6 +10,10 @@ scripts/          Standalone scripts run with `hardhat run`
 hardhat.config.ts
 ```
 
+## Perps design reference (required)
+
+Before implementing or changing production settlement logic, read dYdX Perpetual V1 first (`/Users/if/Work/dydx/perpetual/`, see `docs/REF_DYDX_PERPETUAL_V1.md`), then adapt. Prefer dYdX structure + our Spot patterns over inventing new fill/auth models.
+
 ## Working in this project
 
 When writing or modifying tests, configuring `hardhat.config.ts`, or interacting with the network from TypeScript, invoke the **`hardhat`** skill. It covers Solidity and TypeScript testing, how to choose between them, `forge-std` cheatcodes, the `network.create()` API, `networkHelpers`, and the compile-then-typecheck workflow. The skill itself points to the matching `hardhat-toolbox-*` skill for toolbox-specific guidance (clients, contract interaction, assertions).
