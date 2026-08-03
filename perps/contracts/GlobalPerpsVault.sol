@@ -10,8 +10,8 @@ import {IPerpsPositionView} from "./interfaces/IPerpsPositionView.sol";
 
 /// @title GlobalPerpsVault
 /// @notice Shared Perps custody for ARC native USDC (not an ERC20 / not WUSDC).
-/// @dev User and per-market system balances are ledger entries over the contract's native balance.
-///      Settlement between accounts is accounting-only; only deposit/withdraw move native USDC.
+/// @dev One free-collateral balance per user (cross-wallet UX). Positions live per marketId on the
+///      exchange; open/close PnL credits/debits this shared balance. System cash remains per-market.
 contract GlobalPerpsVault is Ownable, Pausable, ReentrancyGuard {
     using ECDSA for bytes32;
 
@@ -26,6 +26,7 @@ contract GlobalPerpsVault is Ownable, Pausable, ReentrancyGuard {
 
     PendingExchangeUpdate public pendingExchangeUpdate;
 
+    /// @notice Shared free collateral per user (all markets).
     mapping(address => uint256) public balances;
     mapping(uint256 => uint256) public systemBalances;
     mapping(address => mapping(uint256 => bool)) public usedWithdrawOrder;
@@ -130,7 +131,7 @@ contract GlobalPerpsVault is Ownable, Pausable, ReentrancyGuard {
         _unpause();
     }
 
-    /// @notice Deposit ARC native USDC; credits the caller's free collateral.
+    /// @notice Deposit ARC native USDC into the caller's shared free collateral.
     function deposit() external payable whenNotPaused {
         uint256 amount = msg.value;
         if (amount == 0) revert ZeroAmount();
@@ -154,7 +155,7 @@ contract GlobalPerpsVault is Ownable, Pausable, ReentrancyGuard {
     }
 
     /// @notice Request or execute forced withdrawal of full free balance after 7 days.
-    /// @dev Reverts if the user still has an open perps position.
+    /// @dev Reverts if the user still has any open perps position.
     function forcedWithdrawal() external nonReentrant {
         if (IPerpsPositionView(exchange).hasOpenPosition(msg.sender)) revert HasOpenPosition();
 
@@ -201,7 +202,15 @@ contract GlobalPerpsVault is Ownable, Pausable, ReentrancyGuard {
         emit SystemCredited(marketId, amount);
     }
 
-    /// @notice Adjust user free balance by signed delta (loss debit / residual credit).
+    /// @notice Debit system cash (ADL / sync).
+    function debitSystem(uint256 marketId, uint256 amount) external onlyExchange {
+        if (amount == 0) return;
+        if (systemBalances[marketId] < amount) revert InsufficientSystemBalance();
+        systemBalances[marketId] -= amount;
+        emit SystemDebited(marketId, amount);
+    }
+
+    /// @notice Adjust user shared free balance by signed delta.
     function adjustUserBalance(address user, int256 delta) external onlyExchange {
         if (delta == 0) return;
         if (delta > 0) {

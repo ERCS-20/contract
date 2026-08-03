@@ -7,35 +7,29 @@ import {PerpsMathHarness} from "./mocks/PerpsMathHarness.sol";
 
 contract PerpsMathTest is Test {
     PerpsMathHarness internal harness;
-
     uint256 internal constant P = 1e18;
 
     function setUp() public {
         harness = new PerpsMathHarness();
     }
 
-    function test_UnrealizedPnlLong() public view {
-        // long 2 @ 100, mark 110 → pnl = 2 * 10 = 20
-        int256 pnl = harness.unrealizedPnl(2 * int256(P), 100 * P, 110 * P);
-        assertEq(pnl, 20 * int256(P));
+    function test_EquityLong() public view {
+        // margin 100, long 1, mark 110 → equity 210
+        int256 eq = harness.equity(100 * int256(P), 1 * int256(P), 110 * P);
+        assertEq(eq, 210 * int256(P));
     }
 
-    function test_ApplyFillOpenThenPartialClose() public view {
-        (int256 size, uint256 entry, int256 pnl) = harness.applyFill(0, 0, 5 * int256(P), 100 * P);
-        assertEq(size, 5 * int256(P));
-        assertEq(entry, 100 * P);
-        assertEq(pnl, 0);
-
-        (size, entry, pnl) = harness.applyFill(size, entry, -2 * int256(P), 120 * P);
-        assertEq(size, 3 * int256(P));
-        assertEq(entry, 100 * P);
-        // close 2 long: pnl = 2 * 20 = 40
-        assertEq(pnl, 40 * int256(P));
+    function test_ApplyTradeTakerBuys() public view {
+        (int256 tm, int256 tp, int256 mm, int256 mp) =
+            harness.applyTrade(1000 * int256(P), 0, 1000 * int256(P), 0, 1 * P, 100 * P, true);
+        // taker: pos +1, margin -100; maker: pos -1, margin +100
+        assertEq(tp, 1 * int256(P));
+        assertEq(tm, 900 * int256(P));
+        assertEq(mp, -1 * int256(P));
+        assertEq(mm, 1100 * int256(P));
     }
 
-    function test_SystemEquityIncludesInventory() public view {
-        // cash 1000, short 1 @ 100, mark 90 → upnl = (-1)*(90-100)= +10 → equity 1010
-        int256 eq = harness.systemEquity(1000 * P, -1 * int256(P), 100 * P, 90 * P);
-        assertEq(eq, 1010 * int256(P));
+    function test_FillMarginProportional() public view {
+        assertEq(harness.fillMargin(100 * P, 10 * P, 4 * P), 40 * P);
     }
 }

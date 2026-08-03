@@ -1,6 +1,5 @@
 # 参考：dYdX Perpetual V1（本地代码）
 
-> 路径：`/Users/if/Work/dydx/perpetual/`  
 > 版本：Solidity **0.5.16**，Truffle；我们后续目标 **0.8.28** + Hardhat。  
 > 性质：链上保证金 + 链上仓位的永续（**不是** StarkEx / V3 ZK 那套）。
 

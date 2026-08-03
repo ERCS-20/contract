@@ -25,7 +25,7 @@
 |----|------|------|
 | A1 | 已决 | 仓位上链 |
 | A2 | 已决 | AllowedKeys + 用户订单 EIP-712；强平/ADL 不验被处置方签 |
-| A3 | 已决 | 多 marketId；统一保证金；仅 USDC；每市场 S |
+| A3 | 已决（v0） | 金库共用 `balances[user]`；每市场 `Balance{margin,position}`；下单带 margin，成交按比例锁入；平仓退回金库；`addMargin`/`removeMargin` |
 | A4 | 已决 | **C**：引擎 fill + 链上校验 |
 | A5 | 取消 | 无 Claim |
 | B1 | 已决 | 独立 Perps 金库 |
@@ -53,7 +53,7 @@
 4. Spot↔Perps Bridge  
 5. 正常成交兑付不足时的策略（v0 对普通 `settleTrades` 严格要求 S 现金够付；ADL 允许 haircut）
 
-> **抵押品：** ARC 原生 USDC（18 位）；Perps 金库直接托管原生币，不 wrap WUSDC（与 Spot 多币种金库不同）。
+> **抵押品：** ARC 原生 USDC（18 位）；金库 `balances[user]` 一份共用；开平各市场都进出该账户；不 wrap WUSDC。
 
 ### 骨架落地（2026-08-03）
 

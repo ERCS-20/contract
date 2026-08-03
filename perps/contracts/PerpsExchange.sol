@@ -13,27 +13,26 @@ import {PerpsMath} from "./libraries/PerpsMath.sol";
 import {GlobalPerpsVault} from "./GlobalPerpsVault.sol";
 
 /// @title PerpsExchange
-/// @notice Multi-market perpetual settlement: operator-submitted fills, system account S,
-///         liquidation into S, and ADL against S when equity hits a fixed threshold.
+/// @notice Multi-market perpetual settlement with dYdX-style Balance{margin, position}.
+/// @dev GlobalPerpsVault holds shared free USDC. Per-market Balance is funded from the vault
+///      (order.margin on fill, or addMargin). Trades move margin↔position between Balances.
+///      Flat accounts return remaining margin to the vault.
 contract PerpsExchange is Ownable, Pausable, ReentrancyGuard, IPerpsPositionView {
     using ECDSA for bytes32;
-    using PerpsMath for PerpsTypes.Position;
 
     GlobalPerpsVault public vault;
     address public pauseDAO;
 
     mapping(address => bool) public isOperator;
     mapping(uint256 => PerpsTypes.Market) public markets;
-    mapping(address => mapping(uint256 => PerpsTypes.Position)) public positions;
-    /// @dev Number of markets with non-zero size for `hasOpenPosition` fast path.
+    mapping(address => mapping(uint256 => PerpsTypes.Balance)) public balances;
     mapping(address => uint256) public openMarketCount;
 
     bytes32 public immutable DOMAIN_SEPARATOR;
     bytes32 public constant ORDER_TYPEHASH = keccak256(
-        "Order(address trader,uint256 marketId,uint256 amount,uint256 priceX18,bool isBuy,uint256 nonce,uint256 expiry)"
+        "Order(address trader,uint256 marketId,uint256 amount,uint256 margin,uint256 priceX18,bool isBuy,uint256 nonce,uint256 expiry)"
     );
 
-    /// @notice Cumulative filled base amount per EIP-712 order hash (Spot / dYdX style).
     mapping(bytes32 => uint256) public filledAmount;
 
     event VaultSet(address indexed vault);
@@ -51,11 +50,13 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard, IPerpsPositionView
         uint256 priceX18,
         bool takerIsBuy
     );
+    event MarginAdded(address indexed user, uint256 indexed marketId, uint256 amount);
+    event MarginRemoved(address indexed user, uint256 indexed marketId, uint256 amount);
     event Liquidated(
-        uint256 indexed marketId, address indexed user, int256 size, uint256 marginSeized, uint256 markPriceX18
+        uint256 indexed marketId, address indexed user, int256 position, uint256 marginSeized, uint256 markPriceX18
     );
     event AdlExecuted(
-        uint256 indexed marketId, address indexed user, int256 closedSize, uint256 priceX18, int256 realizedPnl
+        uint256 indexed marketId, address indexed user, int256 closedSize, uint256 priceX18
     );
     event SystemSeeded(uint256 indexed marketId, uint256 amount);
 
@@ -70,12 +71,12 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard, IPerpsPositionView
     error OrderExpired();
     error OrderOverfilled();
     error InvalidSignature();
-    error InsufficientSystemCash();
     error AdlNotTriggered();
     error NothingToLiquidate();
     error InvalidFill();
     error PriceInvalid();
     error OrderMismatch();
+    error InsufficientMargin();
 
     modifier onlyOperator() {
         if (!isOperator[msg.sender]) revert NotOperator();
@@ -138,7 +139,7 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard, IPerpsPositionView
             paused: false,
             oracle: oracle,
             adlEquityThreshold: adlEquityThreshold,
-            systemPosition: PerpsTypes.Position(0, 0)
+            systemPosition: 0
         });
         emit MarketCreated(marketId, oracle, adlEquityThreshold);
     }
@@ -162,7 +163,6 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard, IPerpsPositionView
         emit OracleSet(marketId, oracle);
     }
 
-    /// @notice Donate caller's free collateral into this market's system account S.
     function seedSystem(uint256 marketId, uint256 amount) external {
         _requireMarket(marketId);
         if (amount == 0) revert ZeroAmount();
@@ -170,24 +170,42 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard, IPerpsPositionView
         emit SystemSeeded(marketId, amount);
     }
 
-    /// @notice Operator-submitted fill batch. Each fill requires maker + taker EIP-712 order signatures.
-    function settleTrades(PerpsTypes.TradeFill[] calldata fills, PerpsTypes.FillAuth[] calldata auths)
+    /// @notice Move free vault collateral into this market's Balance.margin.
+    function addMargin(uint256 marketId, uint256 amount) external whenNotPaused nonReentrant {
+        _requireMarket(marketId);
+        if (amount == 0) revert ZeroAmount();
+        vault.adjustUserBalance(msg.sender, -int256(amount));
+        _creditMargin(msg.sender, marketId, int256(amount));
+        emit MarginAdded(msg.sender, marketId, amount);
+    }
+
+    /// @notice Move Balance.margin back to free vault collateral.
+    /// @dev v0: allowed whenever remaining margin stays non-negative (no full maintenance check yet).
+    function removeMargin(uint256 marketId, uint256 amount) external whenNotPaused nonReentrant {
+        _requireMarket(marketId);
+        if (amount == 0) revert ZeroAmount();
+        PerpsTypes.Balance storage b = balances[msg.sender][marketId];
+        if (b.margin < int256(amount)) revert InsufficientMargin();
+        b.margin -= int256(amount);
+        vault.adjustUserBalance(msg.sender, int256(amount));
+        emit MarginRemoved(msg.sender, marketId, amount);
+    }
+
+    function settleTrades(PerpsTypes.TradeSettlement[] calldata settlements)
         external
         onlyOperator
         whenNotPaused
         nonReentrant
     {
-        uint256 n = fills.length;
-        if (n == 0 || auths.length != n) revert InvalidFill();
-
+        uint256 n = settlements.length;
+        if (n == 0) revert InvalidFill();
         for (uint256 i = 0; i < n; i++) {
-            _settleOne(fills[i], auths[i]);
+            _settleTrades(settlements[i]);
         }
     }
 
-    /// @notice Liquidate `user` into system account S. Seizes `marginToSeize` free collateral into S cash.
-    /// @dev Does not verify user signature. Operator / AllowedKey only.
-    function liquidate(uint256 marketId, address user, uint256 marginToSeize)
+    /// @notice Liquidate user into S: seize Balance.margin into system cash, merge position into S.
+    function liquidate(uint256 marketId, address user)
         external
         onlyOperator
         whenNotPaused
@@ -196,76 +214,77 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard, IPerpsPositionView
         PerpsTypes.Market storage m = _market(marketId);
         if (m.paused) revert MarketIsPaused();
 
-        PerpsTypes.Position memory userPos = positions[user][marketId];
-        if (userPos.size == 0) revert NothingToLiquidate();
+        PerpsTypes.Balance memory userBal = balances[user][marketId];
+        if (userBal.position == 0) revert NothingToLiquidate();
 
         uint256 mark = IPerpsOracle(m.oracle).getPrice(marketId);
-
-        if (marginToSeize > 0) {
-            vault.transferUserToSystem(user, marketId, marginToSeize);
+        uint256 seized;
+        if (userBal.margin > 0) {
+            seized = uint256(userBal.margin);
+            vault.creditSystem(marketId, seized);
         }
+        m.systemPosition += userBal.position;
+        _clearBalance(user, marketId);
 
-        m.systemPosition = PerpsMath.mergePositions(m.systemPosition, userPos);
-        _clearPosition(user, marketId);
-
-        emit Liquidated(marketId, user, userPos.size, marginToSeize, mark);
+        emit Liquidated(marketId, user, userBal.position, seized, mark);
     }
 
-    /// @notice Force-close (part of) a winning position against S when S equity ≤ threshold.
-    /// @param signedAmount Absolute trade from user perspective: positive = buy, negative = sell.
-    ///        Must reduce user's position toward flat (ADL engine chooses opposite side of inventory).
-    function executeAdl(uint256 marketId, address user, int256 signedAmount)
+    /// @notice ADL: force trade user against S inventory at mark when S equity ≤ threshold.
+    function executeAdl(uint256 marketId, address user, uint256 amount, bool userIsBuy)
         external
         onlyOperator
         whenNotPaused
         nonReentrant
     {
-        if (signedAmount == 0) revert ZeroAmount();
+        if (amount == 0) revert ZeroAmount();
         PerpsTypes.Market storage m = _market(marketId);
         if (m.paused) revert MarketIsPaused();
 
         uint256 mark = IPerpsOracle(m.oracle).getPrice(marketId);
         uint256 systemCash = vault.systemBalances(marketId);
-        int256 equity = PerpsMath.systemEquity(systemCash, m.systemPosition, mark);
-        if (equity > int256(m.adlEquityThreshold)) revert AdlNotTriggered();
+        if (PerpsMath.systemEquity(systemCash, m.systemPosition, mark) > int256(m.adlEquityThreshold)) {
+            revert AdlNotTriggered();
+        }
 
-        PerpsTypes.Position memory userPos = positions[user][marketId];
-        if (userPos.size == 0) revert NothingToLiquidate();
+        PerpsTypes.Balance memory userBal = balances[user][marketId];
+        if (userBal.position == 0) revert NothingToLiquidate();
 
-        // User fill at mark; S takes the opposite. User PnL settles vs S cash (zero-sum for S).
-        (PerpsTypes.Position memory newUserPos, int256 userPnl) = PerpsMath.applyFill(userPos, signedAmount, mark);
-        (PerpsTypes.Position memory newSysPos,) = PerpsMath.applyFill(m.systemPosition, -signedAmount, mark);
+        PerpsTypes.Balance memory sysBal =
+            PerpsTypes.Balance({margin: int256(systemCash), position: m.systemPosition});
 
-        _settleUserPnl(user, marketId, userPnl, true);
-        _setPosition(user, marketId, newUserPos);
-        m.systemPosition = newSysPos;
+        // User is taker vs system as maker.
+        (PerpsTypes.Balance memory newUser, PerpsTypes.Balance memory newSys) =
+            PerpsMath.applyTrade(userBal, sysBal, amount, mark, userIsBuy);
 
-        emit AdlExecuted(marketId, user, signedAmount, mark, userPnl);
+        _setBalance(user, marketId, newUser);
+        _syncSystem(marketId, newSys);
+        _tryReturnMarginToVault(user, marketId);
+
+        emit AdlExecuted(marketId, user, userIsBuy ? int256(amount) : -int256(amount), mark);
     }
 
     function hasOpenPosition(address user) external view returns (bool) {
         return openMarketCount[user] > 0;
     }
 
-    function getPosition(address user, uint256 marketId) external view returns (int256 size, uint256 entryPriceX18) {
-        PerpsTypes.Position memory p = positions[user][marketId];
-        return (p.size, p.entryPriceX18);
+    function getBalance(address user, uint256 marketId)
+        external
+        view
+        returns (int256 margin, int256 position)
+    {
+        PerpsTypes.Balance memory b = balances[user][marketId];
+        return (b.margin, b.position);
     }
 
     function getSystemAccount(uint256 marketId)
         external
         view
-        returns (uint256 systemCash, int256 size, uint256 entryPriceX18, int256 equity)
+        returns (uint256 systemCash, int256 position, int256 equity_)
     {
         PerpsTypes.Market storage m = _market(marketId);
         uint256 mark = IPerpsOracle(m.oracle).getPrice(marketId);
         systemCash = vault.systemBalances(marketId);
-        return (
-            systemCash,
-            m.systemPosition.size,
-            m.systemPosition.entryPriceX18,
-            PerpsMath.systemEquity(systemCash, m.systemPosition, mark)
-        );
+        return (systemCash, m.systemPosition, PerpsMath.systemEquity(systemCash, m.systemPosition, mark));
     }
 
     function isAdlTriggered(uint256 marketId) external view returns (bool) {
@@ -279,87 +298,121 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard, IPerpsPositionView
     // Internal
     // -------------------------------------------------------------------------
 
-    function _settleOne(PerpsTypes.TradeFill calldata fill, PerpsTypes.FillAuth calldata auth) private {
-        PerpsTypes.Market storage m = _market(fill.marketId);
+    function _settleTrades(PerpsTypes.TradeSettlement calldata s) private {
+        uint256 length = s.makerOrders.length;
+        if (length == 0 || length != s.makerSignatures.length || length != s.fulfillments.length) {
+            revert InvalidFill();
+        }
+
+        PerpsTypes.Order calldata takerOrder = s.takerOrder;
+        PerpsTypes.Market storage m = _market(takerOrder.marketId);
         if (m.paused) revert MarketIsPaused();
-        if (fill.amount == 0 || fill.priceX18 == 0) revert InvalidFill();
-        if (fill.maker == fill.taker) revert InvalidFill();
 
-        _matchOrderToFill(auth.makerOrder, fill.maker, fill.marketId, !fill.takerIsBuy);
-        _matchOrderToFill(auth.takerOrder, fill.taker, fill.marketId, fill.takerIsBuy);
+        bytes32 takerHash = _verifyOrder(takerOrder, s.takerSignature);
+        uint256 takerFilled = filledAmount[takerHash];
 
-        _fillOrder(auth.makerOrder, fill.amount, fill.priceX18, auth.makerSig);
-        _fillOrder(auth.takerOrder, fill.amount, fill.priceX18, auth.takerSig);
+        for (uint256 i = 0; i < length;) {
+            PerpsTypes.Order calldata makerOrder = s.makerOrders[i];
+            PerpsTypes.Fulfillment calldata fill = s.fulfillments[i];
 
-        int256 takerSizeChange = fill.takerIsBuy ? int256(fill.amount) : -int256(fill.amount);
-        int256 makerSizeChange = -takerSizeChange;
+            if (fill.amount == 0 || fill.priceX18 == 0) revert InvalidFill();
+            if (makerOrder.trader == takerOrder.trader) revert InvalidFill();
+            if (makerOrder.marketId != takerOrder.marketId) revert OrderMismatch();
+            if (makerOrder.isBuy == takerOrder.isBuy) revert OrderMismatch();
 
-        (PerpsTypes.Position memory newMaker, int256 makerPnl) =
-            PerpsMath.applyFill(positions[fill.maker][fill.marketId], makerSizeChange, fill.priceX18);
-        (PerpsTypes.Position memory newTaker, int256 takerPnl) =
-            PerpsMath.applyFill(positions[fill.taker][fill.marketId], takerSizeChange, fill.priceX18);
+            _requireLimitPrice(makerOrder, fill.priceX18);
+            _requireLimitPrice(takerOrder, fill.priceX18);
 
-        _settleUserPnl(fill.maker, fill.marketId, makerPnl, false);
-        _settleUserPnl(fill.taker, fill.marketId, takerPnl, false);
+            _consumeFill(makerOrder, s.makerSignatures[i], fill.amount);
+            takerFilled += fill.amount;
 
-        _setPosition(fill.maker, fill.marketId, newMaker);
-        _setPosition(fill.taker, fill.marketId, newTaker);
+            uint256 marketId = takerOrder.marketId;
+            _lockFillMargin(makerOrder, fill.amount);
+            _lockFillMargin(takerOrder, fill.amount);
 
-        emit TradeSettled(fill.marketId, fill.maker, fill.taker, fill.amount, fill.priceX18, fill.takerIsBuy);
-    }
+            PerpsTypes.Balance memory makerBal = balances[makerOrder.trader][marketId];
+            PerpsTypes.Balance memory takerBal = balances[takerOrder.trader][marketId];
 
-    /// @dev Profit paid from S cash; loss credited to S cash. If `allowHaircut`, profit is capped by available S cash.
-    function _settleUserPnl(address user, uint256 marketId, int256 pnl, bool allowHaircut) private {
-        if (pnl == 0) return;
-        if (pnl > 0) {
-            uint256 pay = uint256(pnl);
-            uint256 cash = vault.systemBalances(marketId);
-            if (cash < pay) {
-                if (!allowHaircut) revert InsufficientSystemCash();
-                pay = cash;
+            (PerpsTypes.Balance memory newTaker, PerpsTypes.Balance memory newMaker) =
+                PerpsMath.applyTrade(takerBal, makerBal, fill.amount, fill.priceX18, takerOrder.isBuy);
+
+            _setBalance(makerOrder.trader, marketId, newMaker);
+            _setBalance(takerOrder.trader, marketId, newTaker);
+            _tryReturnMarginToVault(makerOrder.trader, marketId);
+            _tryReturnMarginToVault(takerOrder.trader, marketId);
+
+            emit TradeSettled(
+                marketId, makerOrder.trader, takerOrder.trader, fill.amount, fill.priceX18, takerOrder.isBuy
+            );
+
+            unchecked {
+                ++i;
             }
-            if (pay == 0) return;
-            vault.transferSystemToUser(user, marketId, pay);
+        }
+
+        if (takerFilled > takerOrder.amount) revert OrderOverfilled();
+        filledAmount[takerHash] = takerFilled;
+    }
+
+    function _lockFillMargin(PerpsTypes.Order calldata order, uint256 fillAmount) private {
+        uint256 toLock = PerpsMath.fillMargin(order.margin, order.amount, fillAmount);
+        if (toLock == 0) return;
+        vault.adjustUserBalance(order.trader, -int256(toLock));
+        _creditMargin(order.trader, order.marketId, int256(toLock));
+    }
+
+    function _creditMargin(address user, uint256 marketId, int256 amount) private {
+        balances[user][marketId].margin += amount;
+    }
+
+    /// @dev If position is flat and margin > 0, return margin to free vault balance.
+    function _tryReturnMarginToVault(address user, uint256 marketId) private {
+        PerpsTypes.Balance storage b = balances[user][marketId];
+        if (b.position != 0 || b.margin <= 0) return;
+        uint256 amount = uint256(b.margin);
+        b.margin = 0;
+        vault.adjustUserBalance(user, int256(amount));
+    }
+
+    function _syncSystem(uint256 marketId, PerpsTypes.Balance memory sys) private {
+        PerpsTypes.Market storage m = markets[marketId];
+        m.systemPosition = sys.position;
+        uint256 cash = vault.systemBalances(marketId);
+        if (sys.margin >= 0) {
+            uint256 target = uint256(sys.margin);
+            if (target > cash) vault.creditSystem(marketId, target - cash);
+            else if (target < cash) vault.debitSystem(marketId, cash - target);
         } else {
-            uint256 loss = uint256(-pnl);
-            vault.adjustUserBalance(user, -int256(loss));
-            vault.creditSystem(marketId, loss);
+            // Underwater system: zero cash for v0.
+            if (cash > 0) vault.debitSystem(marketId, cash);
         }
     }
 
-    function _matchOrderToFill(PerpsTypes.Order calldata order, address trader, uint256 marketId, bool isBuy)
+    function _verifyOrder(PerpsTypes.Order calldata order, bytes calldata signature)
         private
-        pure
+        view
+        returns (bytes32 orderHash)
     {
-        if (order.trader != trader || order.marketId != marketId || order.isBuy != isBuy) {
-            revert OrderMismatch();
-        }
-    }
-
-    /// @dev Verify EIP-712 signature, limit price, and accumulate fill against order hash.
-    function _fillOrder(
-        PerpsTypes.Order calldata order,
-        uint256 fillAmount,
-        uint256 fillPriceX18,
-        bytes calldata signature
-    ) private {
         if (block.timestamp > order.expiry) revert OrderExpired();
         if (order.amount == 0) revert ZeroAmount();
+        orderHash = _hashOrder(order);
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, orderHash));
+        if (digest.recover(signature) != order.trader) revert InvalidSignature();
+    }
 
-        // Buy limit: execution at or below limit. Sell limit: at or above.
+    function _consumeFill(PerpsTypes.Order calldata order, bytes calldata signature, uint256 fillAmount) private {
+        bytes32 orderHash = _verifyOrder(order, signature);
+        uint256 newFilled = filledAmount[orderHash] + fillAmount;
+        if (newFilled > order.amount) revert OrderOverfilled();
+        filledAmount[orderHash] = newFilled;
+    }
+
+    function _requireLimitPrice(PerpsTypes.Order calldata order, uint256 fillPriceX18) private pure {
         if (order.isBuy) {
             if (fillPriceX18 > order.priceX18) revert PriceInvalid();
         } else if (fillPriceX18 < order.priceX18) {
             revert PriceInvalid();
         }
-
-        bytes32 orderHash = _hashOrder(order);
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, orderHash));
-        if (digest.recover(signature) != order.trader) revert InvalidSignature();
-
-        uint256 newFilled = filledAmount[orderHash] + fillAmount;
-        if (newFilled > order.amount) revert OrderOverfilled();
-        filledAmount[orderHash] = newFilled;
     }
 
     function _hashOrder(PerpsTypes.Order calldata order) internal pure returns (bytes32) {
@@ -369,6 +422,7 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard, IPerpsPositionView
                 order.trader,
                 order.marketId,
                 order.amount,
+                order.margin,
                 order.priceX18,
                 order.isBuy,
                 order.nonce,
@@ -377,18 +431,18 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard, IPerpsPositionView
         );
     }
 
-    function _setPosition(address user, uint256 marketId, PerpsTypes.Position memory newPos) private {
-        PerpsTypes.Position storage cur = positions[user][marketId];
-        bool wasOpen = cur.size != 0;
-        bool nowOpen = newPos.size != 0;
-        cur.size = newPos.size;
-        cur.entryPriceX18 = newPos.entryPriceX18;
+    function _setBalance(address user, uint256 marketId, PerpsTypes.Balance memory newBal) private {
+        PerpsTypes.Balance storage cur = balances[user][marketId];
+        bool wasOpen = cur.position != 0;
+        bool nowOpen = newBal.position != 0;
+        cur.margin = newBal.margin;
+        cur.position = newBal.position;
         if (!wasOpen && nowOpen) openMarketCount[user] += 1;
         if (wasOpen && !nowOpen) openMarketCount[user] -= 1;
     }
 
-    function _clearPosition(address user, uint256 marketId) private {
-        _setPosition(user, marketId, PerpsTypes.Position(0, 0));
+    function _clearBalance(address user, uint256 marketId) private {
+        _setBalance(user, marketId, PerpsTypes.Balance(0, 0));
     }
 
     function _requireMarket(uint256 marketId) private view {

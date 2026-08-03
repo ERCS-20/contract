@@ -4,27 +4,36 @@ pragma solidity 0.8.28;
 import {PerpsTypes} from "../libraries/PerpsTypes.sol";
 import {PerpsMath} from "../libraries/PerpsMath.sol";
 
-/// @dev Thin wrapper so Hardhat/forge tests can exercise PerpsMath.
 contract PerpsMathHarness {
-    function unrealizedPnl(int256 size, uint256 entryPriceX18, uint256 markPriceX18) external pure returns (int256) {
-        return PerpsMath.unrealizedPnl(PerpsTypes.Position(size, entryPriceX18), markPriceX18);
+    function equity(int256 margin, int256 position, uint256 markPriceX18) external pure returns (int256) {
+        return PerpsMath.equity(margin, position, markPriceX18);
     }
 
-    function applyFill(int256 size, uint256 entryPriceX18, int256 signedAmount, uint256 priceX18)
+    function applyTrade(
+        int256 takerMargin,
+        int256 takerPosition,
+        int256 makerMargin,
+        int256 makerPosition,
+        uint256 amount,
+        uint256 priceX18,
+        bool takerIsBuy
+    )
         external
         pure
-        returns (int256 newSize, uint256 newEntry, int256 realizedPnl)
+        returns (int256 newTakerMargin, int256 newTakerPosition, int256 newMakerMargin, int256 newMakerPosition)
     {
-        (PerpsTypes.Position memory p, int256 pnl) =
-            PerpsMath.applyFill(PerpsTypes.Position(size, entryPriceX18), signedAmount, priceX18);
-        return (p.size, p.entryPriceX18, pnl);
+        PerpsTypes.Balance memory taker = PerpsTypes.Balance(takerMargin, takerPosition);
+        PerpsTypes.Balance memory maker = PerpsTypes.Balance(makerMargin, makerPosition);
+        (PerpsTypes.Balance memory nt, PerpsTypes.Balance memory nm) =
+            PerpsMath.applyTrade(taker, maker, amount, priceX18, takerIsBuy);
+        return (nt.margin, nt.position, nm.margin, nm.position);
     }
 
-    function systemEquity(uint256 systemCash, int256 size, uint256 entryPriceX18, uint256 markPriceX18)
+    function fillMargin(uint256 orderMargin, uint256 orderAmount, uint256 fillAmount)
         external
         pure
-        returns (int256)
+        returns (uint256)
     {
-        return PerpsMath.systemEquity(systemCash, PerpsTypes.Position(size, entryPriceX18), markPriceX18);
+        return PerpsMath.fillMargin(orderMargin, orderAmount, fillAmount);
     }
 }

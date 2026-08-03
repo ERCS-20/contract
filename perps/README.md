@@ -104,7 +104,7 @@ ADL 触发：当前权益 ≤ adlEquityThreshold
   └─ 资金费等（是否上链执行见待决）
 
 链上合约
-  ├─ 用户：仓位 + 保证金（统一账户，多 marketId）
+  ├─ 用户：共用保证金账户 + 分市场仓位
   ├─ 每市场系统账户 S：现金 + 协议仓位
   ├─ AllowedKeys + 用户订单 EIP-712（普通成交）
   ├─ 强平 / ADL：operator 提交，不验被强平/被 ADL 用户订单签
@@ -122,7 +122,7 @@ ADL 触发：当前权益 ≤ adlEquityThreshold
 | 成交记账 | **引擎报 fill，合约校验后改余额**（A4=C；非链上自算独立 C） |
 | 结算权限 | AllowedKeys + 用户订单验签（开放提交暂缓） |
 | 金库 | 独立 Perps；与 Spot 隔离 |
-| 市场 | 单合约多 `marketId`；用户侧 cross-margin（多 pair 共用保证金） |
+| 市场 | 单合约多 `marketId`；**共用保证金** + 分市场仓位（v0） |
 | 抵押 | 仅 USDC |
 | 兑付缓冲 | **每市场系统账户 S**（不再单独维护 PP/Claim） |
 | 强平接仓 | **系统 S**（v0） |

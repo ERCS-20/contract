@@ -5,6 +5,7 @@ const orderTypes = {
     { name: "trader", type: "address" },
     { name: "marketId", type: "uint256" },
     { name: "amount", type: "uint256" },
+    { name: "margin", type: "uint256" },
     { name: "priceX18", type: "uint256" },
     { name: "isBuy", type: "bool" },
     { name: "nonce", type: "uint256" },
@@ -16,6 +17,7 @@ export type PerpsOrderMessage = {
   trader: Address;
   marketId: bigint;
   amount: bigint;
+  margin: bigint;
   priceX18: bigint;
   isBuy: boolean;
   nonce: bigint;

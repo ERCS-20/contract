@@ -14,6 +14,7 @@ async function settleOne(
   maker: WalletClient,
   taker: WalletClient,
   amount: bigint,
+  orderMargin: bigint,
   makerNonce: bigint,
   takerNonce: bigint,
 ) {
@@ -26,6 +27,7 @@ async function settleOne(
     trader: makerAddr,
     marketId: MARKET_ID,
     amount,
+    margin: orderMargin,
     priceX18: PRICE,
     isBuy: false,
     nonce: makerNonce,
@@ -35,6 +37,7 @@ async function settleOne(
     trader: takerAddr,
     marketId: MARKET_ID,
     amount,
+    margin: orderMargin,
     priceX18: PRICE,
     isBuy: true,
     nonce: takerNonce,
@@ -47,20 +50,11 @@ async function settleOne(
   await exchangeAsOp.write.settleTrades([
     [
       {
-        marketId: MARKET_ID,
-        maker: makerAddr,
-        taker: takerAddr,
-        amount,
-        priceX18: PRICE,
-        takerIsBuy: true,
-      },
-    ],
-    [
-      {
-        makerOrder,
         takerOrder,
-        makerSig,
-        takerSig,
+        takerSignature: takerSig,
+        makerOrders: [makerOrder],
+        makerSignatures: [makerSig],
+        fulfillments: [{ amount, priceX18: PRICE }],
       },
     ],
   ]);
@@ -95,10 +89,13 @@ describe("GlobalPerpsVault", async function () {
 
   it("forcedWithdrawal reverts while user has open position", async function () {
     const ctx = await deployPerpsSystem();
-    const { viem, publicClient, maker, taker, operator, seed, exchange, vault, MARKET_ID } = ctx;
+    const { viem, publicClient, maker, taker, operator, seed, exchange, vault, MARKET_ID, PRICE } =
+      ctx;
 
-    await fundAndDeposit(ctx, maker, 100n * COL);
-    await fundAndDeposit(ctx, taker, 100n * COL);
+    // Notional = 1 * 100 = 100; lock 200 each so post-trade margin stays positive.
+    const orderMargin = 200n * COL;
+    await fundAndDeposit(ctx, maker, 500n * COL);
+    await fundAndDeposit(ctx, taker, 500n * COL);
     await fundAndDeposit(ctx, seed, 50n * COL);
 
     const exchangeAsSeed = await viem.getContractAt("PerpsExchange", exchange.address, {
@@ -109,7 +106,7 @@ describe("GlobalPerpsVault", async function () {
     const exchangeAsOp = await viem.getContractAt("PerpsExchange", exchange.address, {
       client: { public: publicClient, wallet: operator },
     });
-    await settleOne(ctx, exchangeAsOp, maker, taker, 1n * COL, 1n, 1n);
+    await settleOne(ctx, exchangeAsOp, maker, taker, 1n * COL, orderMargin, 1n, 1n);
 
     const vaultAsMaker = await viem.getContractAt("GlobalPerpsVault", vault.address, {
       client: { public: publicClient, wallet: maker },
@@ -123,12 +120,15 @@ describe("GlobalPerpsVault", async function () {
 });
 
 describe("PerpsExchange", async function () {
-  it("settleTrades opens opposite positions", async function () {
+  it("settleTrades opens opposite positions with Balance margin", async function () {
     const ctx = await deployPerpsSystem();
-    const { viem, publicClient, maker, taker, operator, seed, exchange, MARKET_ID, PRICE } = ctx;
+    const { viem, publicClient, maker, taker, operator, seed, exchange, vault, MARKET_ID, PRICE } =
+      ctx;
 
-    await fundAndDeposit(ctx, maker, 100n * COL);
-    await fundAndDeposit(ctx, taker, 100n * COL);
+    const amount = 2n * COL;
+    const orderMargin = 300n * COL; // notional 200
+    await fundAndDeposit(ctx, maker, 500n * COL);
+    await fundAndDeposit(ctx, taker, 500n * COL);
     await fundAndDeposit(ctx, seed, 50n * COL);
 
     const exchangeAsSeed = await viem.getContractAt("PerpsExchange", exchange.address, {
@@ -139,24 +139,28 @@ describe("PerpsExchange", async function () {
     const exchangeAsOp = await viem.getContractAt("PerpsExchange", exchange.address, {
       client: { public: publicClient, wallet: operator },
     });
+    await settleOne(ctx, exchangeAsOp, maker, taker, amount, orderMargin, 1n, 1n);
 
-    const amount = 2n * COL;
-    await settleOne(ctx, exchangeAsOp, maker, taker, amount, 1n, 1n);
-
-    const makerPos = await exchange.read.getPosition([maker.account.address, MARKET_ID]);
-    const takerPos = await exchange.read.getPosition([taker.account.address, MARKET_ID]);
-    assert.equal(makerPos[0], -amount);
-    assert.equal(takerPos[0], amount);
-    assert.equal(makerPos[1], PRICE);
-    assert.equal(takerPos[1], PRICE);
+    const makerBal = await exchange.read.getBalance([maker.account.address, MARKET_ID]);
+    const takerBal = await exchange.read.getBalance([taker.account.address, MARKET_ID]);
+    // taker buy: pos +2, margin = 300 - 200 = 100; maker sell: pos -2, margin = 300 + 200 = 500
+    assert.equal(takerBal[1], amount);
+    assert.equal(takerBal[0], 100n * COL);
+    assert.equal(makerBal[1], -amount);
+    assert.equal(makerBal[0], 500n * COL);
+    // locked from vault free
+    assert.equal(await vault.read.balances([taker.account.address]), 500n * COL - orderMargin);
+    assert.equal(await vault.read.balances([maker.account.address]), 500n * COL - orderMargin);
   });
 
   it("liquidate moves position into system account and seizes margin", async function () {
     const ctx = await deployPerpsSystem();
     const { viem, publicClient, maker, taker, operator, seed, exchange, vault, MARKET_ID } = ctx;
 
-    await fundAndDeposit(ctx, maker, 100n * COL);
-    await fundAndDeposit(ctx, taker, 100n * COL);
+    const amount = 1n * COL;
+    const orderMargin = 200n * COL;
+    await fundAndDeposit(ctx, maker, 500n * COL);
+    await fundAndDeposit(ctx, taker, 500n * COL);
     await fundAndDeposit(ctx, seed, 50n * COL);
 
     const exchangeAsSeed = await viem.getContractAt("PerpsExchange", exchange.address, {
@@ -167,20 +171,18 @@ describe("PerpsExchange", async function () {
     const exchangeAsOp = await viem.getContractAt("PerpsExchange", exchange.address, {
       client: { public: publicClient, wallet: operator },
     });
+    await settleOne(ctx, exchangeAsOp, maker, taker, amount, orderMargin, 1n, 1n);
 
-    const amount = 1n * COL;
-    await settleOne(ctx, exchangeAsOp, maker, taker, amount, 1n, 1n);
+    // taker margin after buy = 200 - 100 = 100
+    await exchangeAsOp.write.liquidate([MARKET_ID, taker.account.address]);
 
-    const seize = 20n * COL;
-    await exchangeAsOp.write.liquidate([MARKET_ID, taker.account.address, seize]);
-
-    const takerPos = await exchange.read.getPosition([taker.account.address, MARKET_ID]);
-    assert.equal(takerPos[0], 0n);
+    const takerBal = await exchange.read.getBalance([taker.account.address, MARKET_ID]);
+    assert.equal(takerBal[0], 0n);
+    assert.equal(takerBal[1], 0n);
 
     const sys = await exchange.read.getSystemAccount([MARKET_ID]);
     assert.equal(sys[1], amount);
-    assert.equal(sys[0], 50n * COL + seize);
-    assert.equal(await vault.read.balances([taker.account.address]), 100n * COL - seize);
+    assert.equal(sys[0], 50n * COL + 100n * COL);
     assert.equal(await exchange.read.hasOpenPosition([taker.account.address]), false);
   });
 
@@ -195,14 +197,15 @@ describe("PerpsExchange", async function () {
       seed,
       exchange,
       oracle,
-      vault,
       MARKET_ID,
       ADL_THRESHOLD,
     } = ctx;
 
-    await fundAndDeposit(ctx, maker, 100n * COL);
-    await fundAndDeposit(ctx, taker, 100n * COL);
-    const seedAmt = ADL_THRESHOLD + 10n * COL;
+    const amount = 1n * COL;
+    const orderMargin = 50n * COL;
+    await fundAndDeposit(ctx, maker, 500n * COL);
+    await fundAndDeposit(ctx, taker, 500n * COL);
+    const seedAmt = ADL_THRESHOLD;
     await fundAndDeposit(ctx, seed, seedAmt);
 
     const exchangeAsSeed = await viem.getContractAt("PerpsExchange", exchange.address, {
@@ -213,27 +216,18 @@ describe("PerpsExchange", async function () {
     const exchangeAsOp = await viem.getContractAt("PerpsExchange", exchange.address, {
       client: { public: publicClient, wallet: operator },
     });
+    await settleOne(ctx, exchangeAsOp, maker, taker, amount, orderMargin, 1n, 1n);
 
-    const amount = 1n * COL;
-    await settleOne(ctx, exchangeAsOp, maker, taker, amount, 1n, 1n);
-
-    await exchangeAsOp.write.liquidate([MARKET_ID, maker.account.address, 0n]);
+    // Liquidate maker (short, margin≈150) into S; mark↑ → short inventory hurts S equity.
+    await exchangeAsOp.write.liquidate([MARKET_ID, maker.account.address]);
     await oracle.write.setPrice([MARKET_ID, 200n * COL]);
 
     assert.equal(await exchange.read.isAdlTriggered([MARKET_ID]), true);
 
-    const takerBalBefore = await vault.read.balances([taker.account.address]);
-    const sysBefore = await exchange.read.getSystemAccount([MARKET_ID]);
-    await exchangeAsOp.write.executeAdl([MARKET_ID, taker.account.address, -amount]);
+    // Taker is long; ADL sell (userIsBuy=false) closes long vs S.
+    await exchangeAsOp.write.executeAdl([MARKET_ID, taker.account.address, amount, false]);
 
-    const takerPos = await exchange.read.getPosition([taker.account.address, MARKET_ID]);
-    assert.equal(takerPos[0], 0n);
-    const takerBalAfter = await vault.read.balances([taker.account.address]);
-    // Full mark PnL would be +100, but S only has seedAmt cash → haircut to available cash.
-    assert.equal(takerBalAfter - takerBalBefore, sysBefore[0]);
-
-    const sys = await exchange.read.getSystemAccount([MARKET_ID]);
-    assert.equal(sys[1], 0n);
-    assert.equal(sys[0], 0n);
+    const takerBal = await exchange.read.getBalance([taker.account.address, MARKET_ID]);
+    assert.equal(takerBal[1], 0n);
   });
 });
