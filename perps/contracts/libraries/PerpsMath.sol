@@ -3,15 +3,13 @@ pragma solidity 0.8.28;
 
 import {PerpsTypes} from "./PerpsTypes.sol";
 
-/// @notice dYdX-style balance math: trades swap margin ↔ position at fill price.
+/// @notice Perpetual balance math: trades swap margin ↔ position at fill price.
 library PerpsMath {
     error InvalidPrice();
     error AmountZero();
 
     /// @notice Mark-to-market equity ≈ margin + position * mark / 1e18.
     function equity(int256 margin, int256 position, uint256 markPriceX18) internal pure returns (int256) {
-        if (position == 0) return margin;
-        if (markPriceX18 == 0) revert InvalidPrice();
         return margin + (position * int256(markPriceX18)) / int256(PerpsTypes.BASE);
     }
 
@@ -54,5 +52,35 @@ library PerpsMath {
         returns (uint256)
     {
         return (orderMargin * fillAmount) / orderAmount;
+    }
+
+    /// @notice Split margin/position into positive and negative value at `priceX18`.
+    /// @dev Margin leg is scaled by an extra 1e18 so it shares units with `position * price`.
+    function getPositiveAndNegativeValue(int256 margin, int256 position, uint256 priceX18)
+        internal
+        pure
+        returns (uint256 positive, uint256 negative)
+    {
+        if (margin > 0) {
+            positive = uint256(margin) * PerpsTypes.BASE;
+        } else if (margin < 0) {
+            negative = uint256(-margin) * PerpsTypes.BASE;
+        }
+
+        if (position > 0) {
+            positive += uint256(position) * priceX18;
+        } else if (position < 0) {
+            negative += uint256(-position) * priceX18;
+        }
+    }
+
+    /// @notice True if collateralization ratio >= minCollateralX18 / 1e18.
+    function isCollateralized(int256 margin, int256 position, uint256 priceX18, uint256 minCollateralX18)
+        internal
+        pure
+        returns (bool)
+    {
+        (uint256 positive, uint256 negative) = getPositiveAndNegativeValue(margin, position, priceX18);
+        return positive * PerpsTypes.BASE >= negative * minCollateralX18;
     }
 }

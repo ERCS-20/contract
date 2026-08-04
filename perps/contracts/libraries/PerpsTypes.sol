@@ -4,7 +4,11 @@ pragma solidity 0.8.28;
 library PerpsTypes {
     uint256 internal constant BASE = 1e18;
 
-    /// @dev Per-market account (dYdX-style). Margin/position are signed.
+    /// @notice Default min collateralization ratio (1e18 = 100%).
+    /// @dev 100.5% ≈ 0.5% maintenance margin (supports up to ~100x initial leverage).
+    uint256 internal constant MIN_COLLATERAL_X18 = 1.005e18;
+
+    /// @dev Per-market account. Margin/position are signed.
     struct Balance {
         int256 margin;
         int256 position;
@@ -16,6 +20,8 @@ library PerpsTypes {
         address oracle;
         /// @notice Fixed ADL equity threshold (absolute USDC units).
         uint256 adlEquityThreshold;
+        /// @notice Min collateralization ratio (1e18 = 100%). Prefer `MIN_COLLATERAL_X18`.
+        uint256 minCollateralX18;
         /// @notice System inventory size. System cash lives in `GlobalPerpsVault.systemBalances`.
         int256 systemPosition;
     }

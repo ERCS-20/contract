@@ -32,4 +32,11 @@ contract PerpsMathTest is Test {
     function test_FillMarginProportional() public view {
         assertEq(harness.fillMargin(100 * P, 10 * P, 4 * P), 40 * P);
     }
+
+    function test_CollateralizedLong() public view {
+        // margin -50, long 1, mark 100, min 110% → still OK (ratio 2.0)
+        assertTrue(harness.isCollateralized(-50 * int256(P), 1 * int256(P), 100 * P, 11 * P / 10));
+        // mark 50 → not collateralized
+        assertFalse(harness.isCollateralized(-50 * int256(P), 1 * int256(P), 50 * P, 11 * P / 10));
+    }
 }

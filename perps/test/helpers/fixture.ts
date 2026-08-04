@@ -5,6 +5,8 @@ export const MARKET_ID = 1n;
 export const PRICE = 100n * 10n ** 18n;
 /** Fixed ADL equity threshold in collateral units (ARC native USDC = 18 decimals). */
 export const ADL_THRESHOLD = 50n * 10n ** 18n;
+/** Min collateralization ratio: 110% = 1.1e18. */
+export const MIN_COLLATERAL = 11n * 10n ** 17n;
 
 export async function deployPerpsSystem() {
   const { viem } = await network.connect();
@@ -25,7 +27,7 @@ export async function deployPerpsSystem() {
   await exchange.write.setOperator([operator.account.address, true]);
 
   await oracle.write.setPrice([MARKET_ID, PRICE]);
-  await exchange.write.createMarket([MARKET_ID, oracle.address, ADL_THRESHOLD]);
+  await exchange.write.createMarket([MARKET_ID, oracle.address, ADL_THRESHOLD, MIN_COLLATERAL]);
 
   const chainId = await publicClient.getChainId();
 
@@ -47,6 +49,7 @@ export async function deployPerpsSystem() {
     MARKET_ID,
     PRICE,
     ADL_THRESHOLD,
+    MIN_COLLATERAL,
   };
 }
 

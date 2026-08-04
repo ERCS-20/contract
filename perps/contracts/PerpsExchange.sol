@@ -12,7 +12,7 @@ import {PerpsMath} from "./libraries/PerpsMath.sol";
 import {GlobalPerpsVault} from "./GlobalPerpsVault.sol";
 
 /// @title PerpsExchange
-/// @notice Multi-market perpetual settlement with dYdX-style Balance{margin, position}.
+/// @notice Multi-market perpetual settlement with signed Balance{margin, position}.
 /// @dev GlobalPerpsVault holds shared free USDC. Per-market Balance is funded from the vault
 ///      (order.margin on fill, or addMargin). Trades move margin↔position between Balances.
 ///      Flat accounts return remaining margin to the vault.
@@ -26,22 +26,22 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     uint256 public constant FEE_DENOMINATOR = 10_000;
     uint256 public constant MAKER_FEE_NUMERATOR = 2;
     uint256 public constant TAKER_FEE_NUMERATOR = 5;
-
-    mapping(address => bool) public isOperator;
-    mapping(uint256 => PerpsTypes.Market) public markets;
-    mapping(address => mapping(uint256 => PerpsTypes.Balance)) public balances;
-
     bytes32 public immutable DOMAIN_SEPARATOR;
     bytes32 public constant ORDER_TYPEHASH = keccak256(
         "Order(address trader,uint256 marketId,uint256 amount,uint256 margin,uint256 priceX18,bool isBuy,uint256 nonce,uint256 expiry)"
     );
 
+    mapping(address => bool) public isOperator;
+    mapping(uint256 => PerpsTypes.Market) public markets;
+    mapping(address => mapping(uint256 => PerpsTypes.Balance)) public balances;
     mapping(bytes32 => uint256) public filledAmount;
 
     event VaultSet(address indexed vault);
     event PauseDAOSet(address indexed dao);
     event OperatorSet(address indexed account, bool allowed);
-    event MarketCreated(uint256 indexed marketId, address oracle, uint256 adlEquityThreshold);
+    event MarketCreated(
+        uint256 indexed marketId, address oracle, uint256 adlEquityThreshold, uint256 minCollateralX18
+    );
     event MarketPaused(uint256 indexed marketId, bool paused);
     event AdlThresholdSet(uint256 indexed marketId, uint256 threshold);
     event OracleSet(uint256 indexed marketId, address oracle);
@@ -65,15 +65,12 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     event AdlExecuted(
         uint256 indexed marketId, address indexed user, int256 closedSize, uint256 priceX18
     );
-    event SystemSeeded(uint256 indexed marketId, uint256 amount);
 
-    error InvalidAddress();
     error NotOperator();
     error NotPauseDAO();
     error MarketExists();
     error MarketNotFound();
     error MarketIsPaused();
-    error VaultAlreadySet();
     error ZeroAmount();
     error OrderExpired();
     error OrderOverfilled();
@@ -84,6 +81,9 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     error PriceInvalid();
     error OrderMismatch();
     error InsufficientMargin();
+    error NotLiquidatable();
+    error InvalidMinCollateral();
+    error CannotLiquidateNegativeAccount();
 
     modifier onlyOperator() {
         if (!isOperator[msg.sender]) revert NotOperator();
@@ -112,20 +112,16 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     }
 
     function setVault(address vault_) external onlyOwner {
-        if (vault_ == address(0)) revert InvalidAddress();
-        if (address(vault) != address(0)) revert VaultAlreadySet();
         vault = GlobalPerpsVault(vault_);
         emit VaultSet(vault_);
     }
 
     function setPauseDAO(address dao) external onlyOwner {
-        if (dao == address(0)) revert InvalidAddress();
         pauseDAO = dao;
         emit PauseDAOSet(dao);
     }
 
     function setOperator(address account, bool allowed) external onlyOwner {
-        if (account == address(0)) revert InvalidAddress();
         isOperator[account] = allowed;
         emit OperatorSet(account, allowed);
     }
@@ -138,17 +134,29 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         _unpause();
     }
 
-    function createMarket(uint256 marketId, address oracle, uint256 adlEquityThreshold) external onlyOwner {
-        if (oracle == address(0)) revert InvalidAddress();
+    function createMarket(
+        uint256 marketId,
+        address oracle,
+        uint256 adlEquityThreshold,
+        uint256 minCollateralX18
+    ) external onlyOwner {
         if (markets[marketId].exists) revert MarketExists();
+        if (minCollateralX18 < PerpsTypes.BASE) revert InvalidMinCollateral();
         markets[marketId] = PerpsTypes.Market({
             exists: true,
             paused: false,
             oracle: oracle,
             adlEquityThreshold: adlEquityThreshold,
+            minCollateralX18: minCollateralX18,
             systemPosition: 0
         });
-        emit MarketCreated(marketId, oracle, adlEquityThreshold);
+        emit MarketCreated(marketId, oracle, adlEquityThreshold, minCollateralX18);
+    }
+
+    function setMinCollateral(uint256 marketId, uint256 minCollateralX18) external onlyOwner {
+        _requireMarket(marketId);
+        if (minCollateralX18 < PerpsTypes.BASE) revert InvalidMinCollateral();
+        markets[marketId].minCollateralX18 = minCollateralX18;
     }
 
     function setMarketPaused(uint256 marketId, bool paused_) external onlyOwner {
@@ -164,17 +172,9 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     }
 
     function setOracle(uint256 marketId, address oracle) external onlyOwner {
-        if (oracle == address(0)) revert InvalidAddress();
         _requireMarket(marketId);
         markets[marketId].oracle = oracle;
         emit OracleSet(marketId, oracle);
-    }
-
-    function seedSystem(uint256 marketId, uint256 amount) external {
-        _requireMarket(marketId);
-        if (amount == 0) revert ZeroAmount();
-        vault.transferUserToSystem(msg.sender, marketId, amount);
-        emit SystemSeeded(marketId, amount);
     }
 
     /// @notice Move free vault collateral into this market's Balance.margin.
@@ -227,6 +227,13 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         if (userBal.position == 0) revert NothingToLiquidate();
 
         uint256 mark = IPerpsOracle(m.oracle).getPrice(marketId);
+
+        // Cannot liquidate when margin and position are both negative.
+        if (userBal.margin < 0 && userBal.position < 0) revert CannotLiquidateNegativeAccount();
+        if (PerpsMath.isCollateralized(userBal.margin, userBal.position, mark, m.minCollateralX18)) {
+            revert NotLiquidatable();
+        }
+
         uint256 seized;
         if (userBal.margin > 0) {
             seized = uint256(userBal.margin);

@@ -36,4 +36,13 @@ contract PerpsMathHarness {
     {
         return PerpsMath.fillMargin(orderMargin, orderAmount, fillAmount);
     }
+
+    function isCollateralized(
+        int256 margin,
+        int256 position,
+        uint256 priceX18,
+        uint256 minCollateralX18
+    ) external pure returns (bool) {
+        return PerpsMath.isCollateralized(margin, position, priceX18, minCollateralX18);
+    }
 }

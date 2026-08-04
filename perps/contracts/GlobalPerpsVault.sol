@@ -46,6 +46,8 @@ contract GlobalPerpsVault is Ownable, Pausable, ReentrancyGuard {
     event Withdrawn(address indexed user, uint256 amount, uint256 orderId);
     event ForcedWithdrawalRequested(address indexed user);
     event ForcedWithdrawalExecuted(address indexed user, uint256 amount);
+    event SystemSeeded(uint256 indexed marketId, address indexed from, uint256 amount);
+    event SystemWithdrawn(uint256 indexed marketId, address indexed to, uint256 amount);
     event SystemCredited(uint256 indexed marketId, uint256 amount);
     event SystemDebited(uint256 indexed marketId, uint256 amount);
     event UserBalanceAdjusted(address indexed user, int256 delta);
@@ -189,25 +191,26 @@ contract GlobalPerpsVault is Ownable, Pausable, ReentrancyGuard {
         emit ForcedWithdrawalExecuted(msg.sender, amount);
     }
 
-    /// @notice Move user free collateral into per-market system cash (e.g. liquidation seize).
-    function transferUserToSystem(address user, uint256 marketId, uint256 amount) external onlyExchange {
-        if (amount == 0) return;
-        if (balances[user] < amount) revert InsufficientBalance();
-        balances[user] -= amount;
+    /// @notice Seed per-market system cash from the caller's free collateral.
+    function seedSystem(uint256 marketId, uint256 amount) external whenNotPaused nonReentrant {
+        if (amount == 0) revert ZeroAmount();
+        if (balances[msg.sender] < amount) revert InsufficientBalance();
+        balances[msg.sender] -= amount;
         systemBalances[marketId] += amount;
-        emit SystemCredited(marketId, amount);
+        emit SystemSeeded(marketId, msg.sender, amount);
     }
 
-    /// @notice Pay user from per-market system cash (e.g. profitable close).
-    function transferSystemToUser(address user, uint256 marketId, uint256 amount) external onlyExchange {
-        if (amount == 0) return;
+    /// @notice Withdraw per-market system cash (e.g. after a market is delisted).
+    function withdrawSystem(uint256 marketId, address to, uint256 amount) external onlyOwner nonReentrant {
+        if (to == address(0)) revert InvalidAddress();
+        if (amount == 0) revert ZeroAmount();
         if (systemBalances[marketId] < amount) revert InsufficientSystemBalance();
         systemBalances[marketId] -= amount;
-        balances[user] += amount;
-        emit SystemDebited(marketId, amount);
+        _payout(to, amount);
+        emit SystemWithdrawn(marketId, to, amount);
     }
 
-    /// @notice Credit system cash without debiting a user (paired with user loss accounting).
+    /// @notice Credit system cash without debiting a user (e.g. liquidation seize of Balance.margin).
     function creditSystem(uint256 marketId, uint256 amount) external onlyExchange {
         if (amount == 0) return;
         systemBalances[marketId] += amount;
