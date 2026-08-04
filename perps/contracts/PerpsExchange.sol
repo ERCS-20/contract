@@ -7,7 +7,6 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 import {IPerpsOracle} from "./interfaces/IPerpsOracle.sol";
-import {IPerpsPositionView} from "./interfaces/IPerpsPositionView.sol";
 import {PerpsTypes} from "./libraries/PerpsTypes.sol";
 import {PerpsMath} from "./libraries/PerpsMath.sol";
 import {GlobalPerpsVault} from "./GlobalPerpsVault.sol";
@@ -17,16 +16,20 @@ import {GlobalPerpsVault} from "./GlobalPerpsVault.sol";
 /// @dev GlobalPerpsVault holds shared free USDC. Per-market Balance is funded from the vault
 ///      (order.margin on fill, or addMargin). Trades move margin↔position between Balances.
 ///      Flat accounts return remaining margin to the vault.
-contract PerpsExchange is Ownable, Pausable, ReentrancyGuard, IPerpsPositionView {
+contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     using ECDSA for bytes32;
 
     GlobalPerpsVault public vault;
     address public pauseDAO;
 
+    /// @notice Binance USDT-M VIP0-style fees on notional: maker 0.02%, taker 0.05%.
+    uint256 public constant FEE_DENOMINATOR = 10_000;
+    uint256 public constant MAKER_FEE_NUMERATOR = 2;
+    uint256 public constant TAKER_FEE_NUMERATOR = 5;
+
     mapping(address => bool) public isOperator;
     mapping(uint256 => PerpsTypes.Market) public markets;
     mapping(address => mapping(uint256 => PerpsTypes.Balance)) public balances;
-    mapping(address => uint256) public openMarketCount;
 
     bytes32 public immutable DOMAIN_SEPARATOR;
     bytes32 public constant ORDER_TYPEHASH = keccak256(
@@ -48,7 +51,11 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard, IPerpsPositionView
         address indexed taker,
         uint256 amount,
         uint256 priceX18,
-        bool takerIsBuy
+        bool takerIsBuy,
+        uint256 makerMargin,
+        uint256 takerMargin,
+        uint256 makerFee,
+        uint256 takerFee
     );
     event MarginAdded(address indexed user, uint256 indexed marketId, uint256 amount);
     event MarginRemoved(address indexed user, uint256 indexed marketId, uint256 amount);
@@ -197,10 +204,12 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard, IPerpsPositionView
         whenNotPaused
         nonReentrant
     {
-        uint256 n = settlements.length;
-        if (n == 0) revert InvalidFill();
-        for (uint256 i = 0; i < n; i++) {
+        uint256 length = settlements.length;
+        for (uint256 i; i < length;) {
             _settleTrades(settlements[i]);
+            unchecked {
+                ++i;
+            }
         }
     }
 
@@ -263,10 +272,6 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard, IPerpsPositionView
         emit AdlExecuted(marketId, user, userIsBuy ? int256(amount) : -int256(amount), mark);
     }
 
-    function hasOpenPosition(address user) external view returns (bool) {
-        return openMarketCount[user] > 0;
-    }
-
     function getBalance(address user, uint256 marketId)
         external
         view
@@ -311,12 +316,11 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard, IPerpsPositionView
         bytes32 takerHash = _verifyOrder(takerOrder, s.takerSignature);
         uint256 takerFilled = filledAmount[takerHash];
 
-        for (uint256 i = 0; i < length;) {
+        for (uint256 i; i < length;) {
             PerpsTypes.Order calldata makerOrder = s.makerOrders[i];
             PerpsTypes.Fulfillment calldata fill = s.fulfillments[i];
 
             if (fill.amount == 0 || fill.priceX18 == 0) revert InvalidFill();
-            if (makerOrder.trader == takerOrder.trader) revert InvalidFill();
             if (makerOrder.marketId != takerOrder.marketId) revert OrderMismatch();
             if (makerOrder.isBuy == takerOrder.isBuy) revert OrderMismatch();
 
@@ -327,8 +331,8 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard, IPerpsPositionView
             takerFilled += fill.amount;
 
             uint256 marketId = takerOrder.marketId;
-            _lockFillMargin(makerOrder, fill.amount);
-            _lockFillMargin(takerOrder, fill.amount);
+            uint256 makerMargin = _lockFillMargin(makerOrder, fill.amount);
+            uint256 takerMargin = _lockFillMargin(takerOrder, fill.amount);
 
             PerpsTypes.Balance memory makerBal = balances[makerOrder.trader][marketId];
             PerpsTypes.Balance memory takerBal = balances[takerOrder.trader][marketId];
@@ -341,8 +345,22 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard, IPerpsPositionView
             _tryReturnMarginToVault(makerOrder.trader, marketId);
             _tryReturnMarginToVault(takerOrder.trader, marketId);
 
+            uint256 notional = (fill.amount * fill.priceX18) / PerpsTypes.BASE;
+            uint256 makerFee = (notional * MAKER_FEE_NUMERATOR) / FEE_DENOMINATOR;
+            uint256 takerFee = (notional * TAKER_FEE_NUMERATOR) / FEE_DENOMINATOR;
+            vault.collectTradeFees(makerOrder.trader, makerFee, takerOrder.trader, takerFee);
+
             emit TradeSettled(
-                marketId, makerOrder.trader, takerOrder.trader, fill.amount, fill.priceX18, takerOrder.isBuy
+                marketId,
+                makerOrder.trader,
+                takerOrder.trader,
+                fill.amount,
+                fill.priceX18,
+                takerOrder.isBuy,
+                makerMargin,
+                takerMargin,
+                makerFee,
+                takerFee
             );
 
             unchecked {
@@ -354,9 +372,12 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard, IPerpsPositionView
         filledAmount[takerHash] = takerFilled;
     }
 
-    function _lockFillMargin(PerpsTypes.Order calldata order, uint256 fillAmount) private {
-        uint256 toLock = PerpsMath.fillMargin(order.margin, order.amount, fillAmount);
-        if (toLock == 0) return;
+    function _lockFillMargin(PerpsTypes.Order calldata order, uint256 fillAmount)
+        private
+        returns (uint256 toLock)
+    {
+        toLock = PerpsMath.fillMargin(order.margin, order.amount, fillAmount);
+        if (toLock == 0) return toLock;
         vault.adjustUserBalance(order.trader, -int256(toLock));
         _creditMargin(order.trader, order.marketId, int256(toLock));
     }
@@ -433,12 +454,8 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard, IPerpsPositionView
 
     function _setBalance(address user, uint256 marketId, PerpsTypes.Balance memory newBal) private {
         PerpsTypes.Balance storage cur = balances[user][marketId];
-        bool wasOpen = cur.position != 0;
-        bool nowOpen = newBal.position != 0;
         cur.margin = newBal.margin;
         cur.position = newBal.position;
-        if (!wasOpen && nowOpen) openMarketCount[user] += 1;
-        if (wasOpen && !nowOpen) openMarketCount[user] -= 1;
     }
 
     function _clearBalance(address user, uint256 marketId) private {

@@ -31,9 +31,6 @@ library PerpsMath {
         uint256 priceX18,
         bool takerIsBuy
     ) internal pure returns (PerpsTypes.Balance memory newTaker, PerpsTypes.Balance memory newMaker) {
-        if (amount == 0) revert AmountZero();
-        if (priceX18 == 0) revert InvalidPrice();
-
         int256 posAmt = int256(amount);
         int256 quoteAmt = int256((amount * priceX18) / PerpsTypes.BASE);
 
@@ -56,7 +53,6 @@ library PerpsMath {
         pure
         returns (uint256)
     {
-        if (orderAmount == 0 || fillAmount == 0) return 0;
         return (orderMargin * fillAmount) / orderAmount;
     }
 }

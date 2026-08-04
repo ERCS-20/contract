@@ -7,6 +7,19 @@ import { deployPerpsSystem, fundAndDeposit } from "./helpers/fixture.js";
 import { signPerpsOrder, signPerpsWithdraw } from "./helpers/eip712.js";
 
 const COL = 10n ** 18n;
+/** Binance USDT-M VIP0: maker 0.02%, taker 0.05% on notional. */
+const MAKER_FEE_BPS = 2n;
+const TAKER_FEE_BPS = 5n;
+const FEE_DENOM = 10_000n;
+
+function tradeFees(amount: bigint, priceX18: bigint) {
+  const notional = (amount * priceX18) / COL;
+  return {
+    notional,
+    makerFee: (notional * MAKER_FEE_BPS) / FEE_DENOM,
+    takerFee: (notional * TAKER_FEE_BPS) / FEE_DENOM,
+  };
+}
 
 async function settleOne(
   ctx: Awaited<ReturnType<typeof deployPerpsSystem>>,
@@ -87,12 +100,10 @@ describe("GlobalPerpsVault", async function () {
     assert.equal(nativeAfter + gasCost - nativeBefore, 400n * COL);
   });
 
-  it("forcedWithdrawal reverts while user has open position", async function () {
+  it("forcedWithdrawal can request while user has open position", async function () {
     const ctx = await deployPerpsSystem();
-    const { viem, publicClient, maker, taker, operator, seed, exchange, vault, MARKET_ID, PRICE } =
-      ctx;
+    const { viem, publicClient, maker, taker, operator, seed, exchange, vault, MARKET_ID } = ctx;
 
-    // Notional = 1 * 100 = 100; lock 200 each so post-trade margin stays positive.
     const orderMargin = 200n * COL;
     await fundAndDeposit(ctx, maker, 500n * COL);
     await fundAndDeposit(ctx, taker, 500n * COL);
@@ -111,11 +122,9 @@ describe("GlobalPerpsVault", async function () {
     const vaultAsMaker = await viem.getContractAt("GlobalPerpsVault", vault.address, {
       client: { public: publicClient, wallet: maker },
     });
-    await viem.assertions.revertWithCustomError(
-      vaultAsMaker.write.forcedWithdrawal(),
-      vault,
-      "HasOpenPosition",
-    );
+    await vaultAsMaker.write.forcedWithdrawal();
+    const requestedAt = await vault.read.forcedWithdrawalRequestedAt([maker.account.address]);
+    assert.notEqual(requestedAt, 0n);
   });
 });
 
@@ -148,9 +157,17 @@ describe("PerpsExchange", async function () {
     assert.equal(takerBal[0], 100n * COL);
     assert.equal(makerBal[1], -amount);
     assert.equal(makerBal[0], 500n * COL);
-    // locked from vault free
-    assert.equal(await vault.read.balances([taker.account.address]), 500n * COL - orderMargin);
-    assert.equal(await vault.read.balances([maker.account.address]), 500n * COL - orderMargin);
+    const { makerFee, takerFee } = tradeFees(amount, PRICE);
+    // locked margin + trading fee from vault free
+    assert.equal(
+      await vault.read.balances([taker.account.address]),
+      500n * COL - orderMargin - takerFee,
+    );
+    assert.equal(
+      await vault.read.balances([maker.account.address]),
+      500n * COL - orderMargin - makerFee,
+    );
+    assert.equal(await vault.read.protocolFees(), makerFee + takerFee);
   });
 
   it("liquidate moves position into system account and seizes margin", async function () {
@@ -183,7 +200,6 @@ describe("PerpsExchange", async function () {
     const sys = await exchange.read.getSystemAccount([MARKET_ID]);
     assert.equal(sys[1], amount);
     assert.equal(sys[0], 50n * COL + 100n * COL);
-    assert.equal(await exchange.read.hasOpenPosition([taker.account.address]), false);
   });
 
   it("executeAdl runs when system equity is at or below threshold", async function () {

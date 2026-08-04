@@ -9,7 +9,7 @@ export const ADL_THRESHOLD = 50n * 10n ** 18n;
 export async function deployPerpsSystem() {
   const { viem } = await network.connect();
   const publicClient = await viem.getPublicClient();
-  const [deployer, withdrawDao, pauseDao, operator, maker, taker, seed] =
+  const [deployer, withdrawDao, pauseDao, claimFeeDao, operator, maker, taker, seed] =
     await viem.getWalletClients();
 
   const oracle = await viem.deployContract("MockOracle", []);
@@ -21,6 +21,7 @@ export async function deployPerpsSystem() {
   await exchange.write.setPauseDAO([pauseDao.account.address]);
   await vault.write.setWithdrawDAO([withdrawDao.account.address]);
   await vault.write.setPauseDAO([pauseDao.account.address]);
+  await vault.write.setClaimFeeDAO([claimFeeDao.account.address]);
   await exchange.write.setOperator([operator.account.address, true]);
 
   await oracle.write.setPrice([MARKET_ID, PRICE]);
@@ -35,6 +36,7 @@ export async function deployPerpsSystem() {
     deployer,
     withdrawDao,
     pauseDao,
+    claimFeeDao,
     operator,
     maker,
     taker,

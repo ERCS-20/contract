@@ -6,8 +6,6 @@ import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-import {IPerpsPositionView} from "./interfaces/IPerpsPositionView.sol";
-
 /// @title GlobalPerpsVault
 /// @notice Shared Perps custody for ARC native USDC (not an ERC20 / not WUSDC).
 /// @dev One free-collateral balance per user (cross-wallet UX). Positions live per marketId on the
@@ -18,6 +16,7 @@ contract GlobalPerpsVault is Ownable, Pausable, ReentrancyGuard {
     address public exchange;
     address public withdrawDAO;
     address public pauseDAO;
+    address public claimFeeDAO;
 
     struct PendingExchangeUpdate {
         address pendingExchange;
@@ -31,6 +30,8 @@ contract GlobalPerpsVault is Ownable, Pausable, ReentrancyGuard {
     mapping(uint256 => uint256) public systemBalances;
     mapping(address => mapping(uint256 => bool)) public usedWithdrawOrder;
     mapping(address => uint256) public forcedWithdrawalRequestedAt;
+    /// @notice Accumulated protocol trading fees (native USDC).
+    uint256 public protocolFees;
 
     bytes32 public immutable DOMAIN_SEPARATOR;
     bytes32 public constant WITHDRAW_TYPEHASH =
@@ -38,6 +39,7 @@ contract GlobalPerpsVault is Ownable, Pausable, ReentrancyGuard {
 
     event WithdrawDAOSet(address indexed dao);
     event PauseDAOSet(address indexed dao);
+    event ClaimFeeDAOSet(address indexed dao);
     event ExchangeUpdateProposed(address indexed proposedExchange, uint256 executableAt);
     event ExchangeUpdated(address indexed previousExchange, address indexed newExchange);
     event Deposited(address indexed user, uint256 amount);
@@ -47,16 +49,17 @@ contract GlobalPerpsVault is Ownable, Pausable, ReentrancyGuard {
     event SystemCredited(uint256 indexed marketId, uint256 amount);
     event SystemDebited(uint256 indexed marketId, uint256 amount);
     event UserBalanceAdjusted(address indexed user, int256 delta);
+    event FeesClaimed(address indexed to, uint256 amount);
 
     error NotExchange();
     error NotWithdrawDAO();
     error NotPauseDAO();
+    error NotClaimFeeDAO();
     error InvalidAddress();
     error InsufficientBalance();
     error InsufficientSystemBalance();
     error WithdrawOrderAlreadyUsed();
     error ForcedWithdrawalTooEarly();
-    error HasOpenPosition();
     error NoPendingExchangeUpdate();
     error ExchangeUpdateTooEarly();
     error ZeroAmount();
@@ -69,6 +72,11 @@ contract GlobalPerpsVault is Ownable, Pausable, ReentrancyGuard {
 
     modifier onlyPauseDAO() {
         if (msg.sender != pauseDAO) revert NotPauseDAO();
+        _;
+    }
+
+    modifier onlyClaimFeeDAO() {
+        if (msg.sender != claimFeeDAO) revert NotClaimFeeDAO();
         _;
     }
 
@@ -102,6 +110,12 @@ contract GlobalPerpsVault is Ownable, Pausable, ReentrancyGuard {
         if (dao == address(0)) revert InvalidAddress();
         pauseDAO = dao;
         emit PauseDAOSet(dao);
+    }
+
+    function setClaimFeeDAO(address dao) external onlyOwner {
+        if (dao == address(0)) revert InvalidAddress();
+        claimFeeDAO = dao;
+        emit ClaimFeeDAOSet(dao);
     }
 
     function proposeExchangeUpdate(address newExchange) external onlyOwner {
@@ -155,10 +169,8 @@ contract GlobalPerpsVault is Ownable, Pausable, ReentrancyGuard {
     }
 
     /// @notice Request or execute forced withdrawal of full free balance after 7 days.
-    /// @dev Reverts if the user still has any open perps position.
+    /// @dev Only free vault balance; locked per-market margin is unaffected.
     function forcedWithdrawal() external nonReentrant {
-        if (IPerpsPositionView(exchange).hasOpenPosition(msg.sender)) revert HasOpenPosition();
-
         uint256 requestedAt = forcedWithdrawalRequestedAt[msg.sender];
         if (requestedAt == 0) {
             forcedWithdrawalRequestedAt[msg.sender] = block.timestamp;
@@ -212,7 +224,6 @@ contract GlobalPerpsVault is Ownable, Pausable, ReentrancyGuard {
 
     /// @notice Adjust user shared free balance by signed delta.
     function adjustUserBalance(address user, int256 delta) external onlyExchange {
-        if (delta == 0) return;
         if (delta > 0) {
             balances[user] += uint256(delta);
         } else {
@@ -221,6 +232,28 @@ contract GlobalPerpsVault is Ownable, Pausable, ReentrancyGuard {
             balances[user] -= amt;
         }
         emit UserBalanceAdjusted(user, delta);
+    }
+
+    /// @notice Debit maker/taker free balances into the protocol fee pool in one call.
+    function collectTradeFees(address maker, uint256 makerFee, address taker, uint256 takerFee)
+        external
+        onlyExchange
+    {
+        if (balances[maker] < makerFee) revert InsufficientBalance();
+        balances[maker] -= makerFee;
+        if (balances[taker] < takerFee) revert InsufficientBalance();
+        balances[taker] -= takerFee;
+
+        protocolFees += (makerFee + takerFee);
+    }
+
+    /// @notice Claim accumulated protocol fees to `claimFeeDAO`.
+    function claimFees() external onlyClaimFeeDAO nonReentrant {
+        uint256 amount = protocolFees;
+        if (amount == 0) return;
+        protocolFees = 0;
+        _payout(msg.sender, amount);
+        emit FeesClaimed(msg.sender, amount);
     }
 
     function _payout(address to, uint256 amount) private {
