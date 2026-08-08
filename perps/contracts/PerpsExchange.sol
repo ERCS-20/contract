@@ -7,6 +7,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 import {IPerpsOracle} from "./interfaces/IPerpsOracle.sol";
+import {IFundingOracle} from "./interfaces/IFundingOracle.sol";
 import {PerpsTypes} from "./libraries/PerpsTypes.sol";
 import {PerpsMath} from "./libraries/PerpsMath.sol";
 import {GlobalPerpsVault} from "./GlobalPerpsVault.sol";
@@ -15,7 +16,8 @@ import {GlobalPerpsVault} from "./GlobalPerpsVault.sol";
 /// @notice Multi-market perpetual settlement with signed Balance{margin, position}.
 /// @dev GlobalPerpsVault holds shared free USDC. Per-market Balance is funded from the vault
 ///      (order.margin on fill, or addMargin). Trades move margin↔position between Balances.
-///      Flat accounts return remaining margin to the vault.
+///      Flat accounts return remaining margin to the vault. Funding uses a continuous per-market
+///      index with lazy settlement into Balance.margin. Liquidations merge into approved liquidators.
 contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     using ECDSA for bytes32;
 
@@ -32,19 +34,34 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     );
 
     mapping(address => bool) public isOperator;
+    /// @notice Global liquidator allowlist (same L set for all markets).
+    mapping(address => bool) public isLiquidator;
     mapping(uint256 => PerpsTypes.Market) public markets;
     mapping(address => mapping(uint256 => PerpsTypes.Balance)) public balances;
     mapping(bytes32 => uint256) public filledAmount;
+    /// @notice Per-market continuous funding index.
+    mapping(uint256 => PerpsTypes.FundingIndex) public fundingIndex;
+    /// @notice Last settled funding index per account.
+    mapping(address => mapping(uint256 => PerpsTypes.FundingIndex)) public localFundingIndex;
 
     event VaultSet(address indexed vault);
     event PauseDAOSet(address indexed dao);
     event OperatorSet(address indexed account, bool allowed);
+    event LiquidatorSet(address indexed account, bool allowed);
     event MarketCreated(
-        uint256 indexed marketId, address oracle, uint256 adlEquityThreshold, uint256 minCollateralX18
+        uint256 indexed marketId,
+        address oracle,
+        address funder,
+        uint256 adlEquityThreshold,
+        uint256 minCollateralX18
     );
     event MarketPaused(uint256 indexed marketId, bool paused);
     event AdlThresholdSet(uint256 indexed marketId, uint256 threshold);
     event OracleSet(uint256 indexed marketId, address oracle);
+    event FunderSet(uint256 indexed marketId, address funder);
+    event FundingIndexUpdated(uint256 indexed marketId, int256 value, uint256 timestamp);
+    event FundingSettled(address indexed account, uint256 indexed marketId, int256 marginDelta);
+    event FundingSampled(uint256 indexed marketId, uint256 lastPriceX18, bool updated);
     event TradeSettled(
         uint256 indexed marketId,
         address indexed maker,
@@ -60,10 +77,20 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     event MarginAdded(address indexed user, uint256 indexed marketId, uint256 amount);
     event MarginRemoved(address indexed user, uint256 indexed marketId, uint256 amount);
     event Liquidated(
-        uint256 indexed marketId, address indexed user, int256 position, uint256 marginSeized, uint256 markPriceX18
+        uint256 indexed marketId,
+        address indexed user,
+        address indexed liquidator,
+        int256 position,
+        uint256 marginSeized,
+        uint256 marginTopUp,
+        uint256 markPriceX18
     );
     event AdlExecuted(
-        uint256 indexed marketId, address indexed user, int256 closedSize, uint256 priceX18
+        uint256 indexed marketId,
+        address indexed user,
+        address indexed liquidator,
+        int256 closedSize,
+        uint256 priceX18
     );
 
     error NotOperator();
@@ -84,6 +111,9 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     error NotLiquidatable();
     error InvalidMinCollateral();
     error CannotLiquidateNegativeAccount();
+    error NotLiquidator();
+    error FunderNotSet();
+    error NoLastPrice();
 
     modifier onlyOperator() {
         if (!isOperator[msg.sender]) revert NotOperator();
@@ -126,6 +156,11 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         emit OperatorSet(account, allowed);
     }
 
+    function setLiquidator(address account, bool allowed) external onlyOwner {
+        isLiquidator[account] = allowed;
+        emit LiquidatorSet(account, allowed);
+    }
+
     function pause() external onlyPauseDAO {
         _pause();
     }
@@ -137,6 +172,7 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     function createMarket(
         uint256 marketId,
         address oracle,
+        address funder,
         uint256 adlEquityThreshold,
         uint256 minCollateralX18
     ) external onlyOwner {
@@ -146,11 +182,13 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
             exists: true,
             paused: false,
             oracle: oracle,
+            funder: funder,
             adlEquityThreshold: adlEquityThreshold,
             minCollateralX18: minCollateralX18,
-            systemPosition: 0
+            lastPriceX18: 0
         });
-        emit MarketCreated(marketId, oracle, adlEquityThreshold, minCollateralX18);
+        fundingIndex[marketId] = PerpsTypes.FundingIndex({timestamp: block.timestamp, value: 0});
+        emit MarketCreated(marketId, oracle, funder, adlEquityThreshold, minCollateralX18);
     }
 
     function setMinCollateral(uint256 marketId, uint256 minCollateralX18) external onlyOwner {
@@ -177,10 +215,40 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         emit OracleSet(marketId, oracle);
     }
 
+    function setFunder(uint256 marketId, address funder) external onlyOwner {
+        _requireMarket(marketId);
+        markets[marketId].funder = funder;
+        emit FunderSet(marketId, funder);
+    }
+
+    /// @notice Advance market funding index and settle funding for `account` into Balance.margin.
+    function settleFunding(address account, uint256 marketId) external whenNotPaused nonReentrant {
+        _requireMarket(marketId);
+        PerpsTypes.FundingIndex memory index = _advanceFundingIndex(marketId);
+        _settleAccountFunding(account, marketId, index);
+    }
+
+    /// @notice Accrue funding index with the cached rate, then resample rate from `lastPriceX18`.
+    /// @dev onlyOperator: avoids flash-loan spot + public sample. Use when idle (no trades).
+    function updateFunding(uint256 marketId) external onlyOperator whenNotPaused nonReentrant {
+        PerpsTypes.Market storage m = _market(marketId);
+        if (m.lastPriceX18 == 0) revert NoLastPrice();
+
+        // Apply existing cached rate to elapsed time before taking a new sample.
+        _advanceFundingIndex(marketId);
+        _sampleFunding(marketId, m);
+    }
+
+    function getLastPrice(uint256 marketId) external view returns (uint256) {
+        return _market(marketId).lastPriceX18;
+    }
+
     /// @notice Move free vault collateral into this market's Balance.margin.
     function addMargin(uint256 marketId, uint256 amount) external whenNotPaused nonReentrant {
         _requireMarket(marketId);
         if (amount == 0) revert ZeroAmount();
+        PerpsTypes.FundingIndex memory index = _advanceFundingIndex(marketId);
+        _settleAccountFunding(msg.sender, marketId, index);
         vault.adjustUserBalance(msg.sender, -int256(amount));
         _creditMargin(msg.sender, marketId, int256(amount));
         emit MarginAdded(msg.sender, marketId, amount);
@@ -191,6 +259,8 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     function removeMargin(uint256 marketId, uint256 amount) external whenNotPaused nonReentrant {
         _requireMarket(marketId);
         if (amount == 0) revert ZeroAmount();
+        PerpsTypes.FundingIndex memory index = _advanceFundingIndex(marketId);
+        _settleAccountFunding(msg.sender, marketId, index);
         PerpsTypes.Balance storage b = balances[msg.sender][marketId];
         if (b.margin < int256(amount)) revert InsufficientMargin();
         b.margin -= int256(amount);
@@ -198,6 +268,7 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         emit MarginRemoved(msg.sender, marketId, amount);
     }
 
+    /// @dev Prefer one market per call. `lastPrice` / funding sample use the last settlement's last fill.
     function settleTrades(PerpsTypes.TradeSettlement[] calldata settlements)
         external
         onlyOperator
@@ -211,17 +282,32 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
                 ++i;
             }
         }
+
+        PerpsTypes.TradeSettlement calldata last = settlements[length - 1];
+        uint256 fillLen = last.fulfillments.length;
+
+        uint256 marketId = last.takerOrder.marketId;
+        PerpsTypes.Market storage m = markets[marketId];
+        m.lastPriceX18 = last.fulfillments[fillLen - 1].priceX18;
+        _sampleFunding(marketId, m);
     }
 
-    /// @notice Liquidate user into S: seize Balance.margin into system cash, merge position into S.
-    function liquidate(uint256 marketId, address user)
+    /// @notice Liquidate user into `liquidator`: merge position, seize positive margin, optional top-up.
+    /// @param marginTopUp Extra margin pulled from liquidator's vault free balance into this market.
+    function liquidate(uint256 marketId, address user, address liquidator, uint256 marginTopUp)
         external
         onlyOperator
         whenNotPaused
         nonReentrant
     {
+        if (!isLiquidator[liquidator]) revert NotLiquidator();
+
         PerpsTypes.Market storage m = _market(marketId);
         if (m.paused) revert MarketIsPaused();
+
+        PerpsTypes.FundingIndex memory index = _advanceFundingIndex(marketId);
+        _settleAccountFunding(user, marketId, index);
+        _settleAccountFunding(liquidator, marketId, index);
 
         PerpsTypes.Balance memory userBal = balances[user][marketId];
         if (userBal.position == 0) revert NothingToLiquidate();
@@ -234,49 +320,61 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
             revert NotLiquidatable();
         }
 
+        PerpsTypes.Balance memory liqBal = balances[liquidator][marketId];
         uint256 seized;
         if (userBal.margin > 0) {
             seized = uint256(userBal.margin);
-            vault.creditSystem(marketId, seized);
+            liqBal.margin += userBal.margin;
         }
-        m.systemPosition += userBal.position;
+        liqBal.position += userBal.position;
+
+        if (marginTopUp > 0) {
+            vault.adjustUserBalance(liquidator, -int256(marginTopUp));
+            liqBal.margin += int256(marginTopUp);
+        }
+
+        _setBalance(liquidator, marketId, liqBal);
         _clearBalance(user, marketId);
 
-        emit Liquidated(marketId, user, userBal.position, seized, mark);
+        emit Liquidated(marketId, user, liquidator, userBal.position, seized, marginTopUp, mark);
     }
 
-    /// @notice ADL: force trade user against S inventory at mark when S equity ≤ threshold.
-    function executeAdl(uint256 marketId, address user, uint256 amount, bool userIsBuy)
-        external
-        onlyOperator
-        whenNotPaused
-        nonReentrant
-    {
+    /// @notice ADL: force trade user against liquidator at mark when L margin ≤ threshold.
+    function executeAdl(
+        uint256 marketId,
+        address user,
+        address liquidator,
+        uint256 amount,
+        bool userIsBuy
+    ) external onlyOperator whenNotPaused nonReentrant {
         if (amount == 0) revert ZeroAmount();
+        if (!isLiquidator[liquidator]) revert NotLiquidator();
+
         PerpsTypes.Market storage m = _market(marketId);
         if (m.paused) revert MarketIsPaused();
 
-        uint256 mark = IPerpsOracle(m.oracle).getPrice(marketId);
-        uint256 systemCash = vault.systemBalances(marketId);
-        if (PerpsMath.systemEquity(systemCash, m.systemPosition, mark) > int256(m.adlEquityThreshold)) {
-            revert AdlNotTriggered();
-        }
+        PerpsTypes.FundingIndex memory index = _advanceFundingIndex(marketId);
+        _settleAccountFunding(user, marketId, index);
+        _settleAccountFunding(liquidator, marketId, index);
+
+        if (!_isAdlTriggered(marketId, liquidator)) revert AdlNotTriggered();
 
         PerpsTypes.Balance memory userBal = balances[user][marketId];
         if (userBal.position == 0) revert NothingToLiquidate();
 
-        PerpsTypes.Balance memory sysBal =
-            PerpsTypes.Balance({margin: int256(systemCash), position: m.systemPosition});
+        uint256 mark = IPerpsOracle(m.oracle).getPrice(marketId);
+        PerpsTypes.Balance memory liqBal = balances[liquidator][marketId];
 
-        // User is taker vs system as maker.
-        (PerpsTypes.Balance memory newUser, PerpsTypes.Balance memory newSys) =
-            PerpsMath.applyTrade(userBal, sysBal, amount, mark, userIsBuy);
+        // User is taker vs liquidator as maker.
+        (PerpsTypes.Balance memory newUser, PerpsTypes.Balance memory newLiq) =
+            PerpsMath.applyTrade(userBal, liqBal, amount, mark, userIsBuy);
 
         _setBalance(user, marketId, newUser);
-        _syncSystem(marketId, newSys);
+        _setBalance(liquidator, marketId, newLiq);
         _tryReturnMarginToVault(user, marketId);
+        _tryReturnMarginToVault(liquidator, marketId);
 
-        emit AdlExecuted(marketId, user, userIsBuy ? int256(amount) : -int256(amount), mark);
+        emit AdlExecuted(marketId, user, liquidator, userIsBuy ? int256(amount) : -int256(amount), mark);
     }
 
     function getBalance(address user, uint256 marketId)
@@ -288,27 +386,19 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         return (b.margin, b.position);
     }
 
-    function getSystemAccount(uint256 marketId)
-        external
-        view
-        returns (uint256 systemCash, int256 position, int256 equity_)
-    {
-        PerpsTypes.Market storage m = _market(marketId);
-        uint256 mark = IPerpsOracle(m.oracle).getPrice(marketId);
-        systemCash = vault.systemBalances(marketId);
-        return (systemCash, m.systemPosition, PerpsMath.systemEquity(systemCash, m.systemPosition, mark));
-    }
-
-    function isAdlTriggered(uint256 marketId) external view returns (bool) {
-        PerpsTypes.Market storage m = _market(marketId);
-        uint256 mark = IPerpsOracle(m.oracle).getPrice(marketId);
-        return PerpsMath.systemEquity(vault.systemBalances(marketId), m.systemPosition, mark)
-            <= int256(m.adlEquityThreshold);
+    function isAdlTriggered(uint256 marketId, address liquidator) external view returns (bool) {
+        _requireMarket(marketId);
+        if (!isLiquidator[liquidator]) return false;
+        return _isAdlTriggered(marketId, liquidator);
     }
 
     // -------------------------------------------------------------------------
     // Internal
     // -------------------------------------------------------------------------
+
+    function _isAdlTriggered(uint256 marketId, address liquidator) private view returns (bool) {
+        return balances[liquidator][marketId].margin <= int256(markets[marketId].adlEquityThreshold);
+    }
 
     function _settleTrades(PerpsTypes.TradeSettlement calldata s) private {
         uint256 length = s.makerOrders.length;
@@ -317,8 +407,12 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         }
 
         PerpsTypes.Order calldata takerOrder = s.takerOrder;
-        PerpsTypes.Market storage m = _market(takerOrder.marketId);
+        uint256 marketId = takerOrder.marketId;
+        PerpsTypes.Market storage m = _market(marketId);
         if (m.paused) revert MarketIsPaused();
+        
+        PerpsTypes.FundingIndex memory index = _advanceFundingIndex(marketId);
+        _settleAccountFunding(takerOrder.trader, marketId, index);
 
         bytes32 takerHash = _verifyOrder(takerOrder, s.takerSignature);
         uint256 takerFilled = filledAmount[takerHash];
@@ -334,10 +428,11 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
             _requireLimitPrice(makerOrder, fill.priceX18);
             _requireLimitPrice(takerOrder, fill.priceX18);
 
+            _settleAccountFunding(makerOrder.trader, marketId, index);
+
             _consumeFill(makerOrder, s.makerSignatures[i], fill.amount);
             takerFilled += fill.amount;
 
-            uint256 marketId = takerOrder.marketId;
             uint256 makerMargin = _lockFillMargin(makerOrder, fill.amount);
             uint256 takerMargin = _lockFillMargin(takerOrder, fill.amount);
 
@@ -379,6 +474,56 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         filledAmount[takerHash] = takerFilled;
     }
 
+    function _sampleFunding(uint256 marketId, PerpsTypes.Market storage m) private {
+        bool updated = IFundingOracle(m.funder).update(m.lastPriceX18);
+        emit FundingSampled(marketId, m.lastPriceX18, updated);
+    }
+
+    /// @dev Advance continuous funding index: Δindex += ±(unitlessFunding * mark / 1e18).
+    function _advanceFundingIndex(uint256 marketId) private returns (PerpsTypes.FundingIndex memory index) {
+        PerpsTypes.Market storage m = markets[marketId];
+        index = fundingIndex[marketId];
+
+        if (index.timestamp == 0) {
+            index.timestamp = block.timestamp;
+            fundingIndex[marketId] = index;
+            return index;
+        }
+
+        uint256 timeDelta = block.timestamp - index.timestamp;
+        if (timeDelta == 0) return index;
+
+        if (m.funder != address(0)) {
+            uint256 mark = IPerpsOracle(m.oracle).getPrice(marketId);
+            (bool positive, uint256 unitless) = IFundingOracle(m.funder).getFunding(timeDelta);
+            int256 delta = int256((unitless * mark) / PerpsTypes.BASE);
+            if (!positive) delta = -delta;
+            index.value += delta;
+        }
+
+        index.timestamp = block.timestamp;
+        fundingIndex[marketId] = index;
+        emit FundingIndexUpdated(marketId, index.value, index.timestamp);
+    }
+
+    function _settleAccountFunding(address account, uint256 marketId, PerpsTypes.FundingIndex memory globalIndex)
+        private
+    {
+        PerpsTypes.FundingIndex storage local = localFundingIndex[account][marketId];
+        if (local.timestamp == globalIndex.timestamp) return;
+
+        int256 indexDelta = globalIndex.value - local.value;
+        local.timestamp = globalIndex.timestamp;
+        local.value = globalIndex.value;
+
+        PerpsTypes.Balance storage b = balances[account][marketId];
+        if (b.position == 0 || indexDelta == 0) return;
+
+        int256 marginDelta = PerpsMath.fundingMarginDelta(indexDelta, b.position);
+        b.margin += marginDelta;
+        emit FundingSettled(account, marketId, marginDelta);
+    }
+
     function _lockFillMargin(PerpsTypes.Order calldata order, uint256 fillAmount)
         private
         returns (uint256 toLock)
@@ -400,20 +545,6 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         uint256 amount = uint256(b.margin);
         b.margin = 0;
         vault.adjustUserBalance(user, int256(amount));
-    }
-
-    function _syncSystem(uint256 marketId, PerpsTypes.Balance memory sys) private {
-        PerpsTypes.Market storage m = markets[marketId];
-        m.systemPosition = sys.position;
-        uint256 cash = vault.systemBalances(marketId);
-        if (sys.margin >= 0) {
-            uint256 target = uint256(sys.margin);
-            if (target > cash) vault.creditSystem(marketId, target - cash);
-            else if (target < cash) vault.debitSystem(marketId, cash - target);
-        } else {
-            // Underwater system: zero cash for v0.
-            if (cash > 0) vault.debitSystem(marketId, cash);
-        }
     }
 
     function _verifyOrder(PerpsTypes.Order calldata order, bytes calldata signature)

@@ -13,14 +13,6 @@ library PerpsMath {
         return margin + (position * int256(markPriceX18)) / int256(PerpsTypes.BASE);
     }
 
-    function systemEquity(uint256 systemCash, int256 systemPosition, uint256 markPriceX18)
-        internal
-        pure
-        returns (int256)
-    {
-        return equity(int256(systemCash), systemPosition, markPriceX18);
-    }
-
     /// @notice Apply a bilateral fill (taker perspective `takerIsBuy`).
     function applyTrade(
         PerpsTypes.Balance memory taker,
@@ -82,5 +74,12 @@ library PerpsMath {
     {
         (uint256 positive, uint256 negative) = getPositiveAndNegativeValue(margin, position, priceX18);
         return positive * PerpsTypes.BASE >= negative * minCollateralX18;
+    }
+
+    /// @notice Margin delta from funding: `-(indexDelta * position) / 1e18`.
+    /// @dev Index up + long => debit; index up + short => credit.
+    function fundingMarginDelta(int256 indexDelta, int256 position) internal pure returns (int256) {
+        if (indexDelta == 0 || position == 0) return 0;
+        return -((indexDelta * position) / int256(PerpsTypes.BASE));
     }
 }

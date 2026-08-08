@@ -9,7 +9,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 /// @title GlobalPerpsVault
 /// @notice Shared Perps custody for ARC native USDC (not an ERC20 / not WUSDC).
 /// @dev One free-collateral balance per user (cross-wallet UX). Positions live per marketId on the
-///      exchange; open/close PnL credits/debits this shared balance. System cash remains per-market.
+///      exchange; open/close PnL credits/debits this shared balance.
 contract GlobalPerpsVault is Ownable, Pausable, ReentrancyGuard {
     using ECDSA for bytes32;
 
@@ -27,7 +27,6 @@ contract GlobalPerpsVault is Ownable, Pausable, ReentrancyGuard {
 
     /// @notice Shared free collateral per user (all markets).
     mapping(address => uint256) public balances;
-    mapping(uint256 => uint256) public systemBalances;
     mapping(address => mapping(uint256 => bool)) public usedWithdrawOrder;
     mapping(address => uint256) public forcedWithdrawalRequestedAt;
     /// @notice Accumulated protocol trading fees (native USDC).
@@ -46,10 +45,6 @@ contract GlobalPerpsVault is Ownable, Pausable, ReentrancyGuard {
     event Withdrawn(address indexed user, uint256 amount, uint256 orderId);
     event ForcedWithdrawalRequested(address indexed user);
     event ForcedWithdrawalExecuted(address indexed user, uint256 amount);
-    event SystemSeeded(uint256 indexed marketId, address indexed from, uint256 amount);
-    event SystemWithdrawn(uint256 indexed marketId, address indexed to, uint256 amount);
-    event SystemCredited(uint256 indexed marketId, uint256 amount);
-    event SystemDebited(uint256 indexed marketId, uint256 amount);
     event UserBalanceAdjusted(address indexed user, int256 delta);
     event FeesClaimed(address indexed to, uint256 amount);
 
@@ -59,7 +54,6 @@ contract GlobalPerpsVault is Ownable, Pausable, ReentrancyGuard {
     error NotClaimFeeDAO();
     error InvalidAddress();
     error InsufficientBalance();
-    error InsufficientSystemBalance();
     error WithdrawOrderAlreadyUsed();
     error ForcedWithdrawalTooEarly();
     error NoPendingExchangeUpdate();
@@ -189,40 +183,6 @@ contract GlobalPerpsVault is Ownable, Pausable, ReentrancyGuard {
         balances[msg.sender] = 0;
         _payout(msg.sender, amount);
         emit ForcedWithdrawalExecuted(msg.sender, amount);
-    }
-
-    /// @notice Seed per-market system cash from the caller's free collateral.
-    function seedSystem(uint256 marketId, uint256 amount) external whenNotPaused nonReentrant {
-        if (amount == 0) revert ZeroAmount();
-        if (balances[msg.sender] < amount) revert InsufficientBalance();
-        balances[msg.sender] -= amount;
-        systemBalances[marketId] += amount;
-        emit SystemSeeded(marketId, msg.sender, amount);
-    }
-
-    /// @notice Withdraw per-market system cash (e.g. after a market is delisted).
-    function withdrawSystem(uint256 marketId, address to, uint256 amount) external onlyOwner nonReentrant {
-        if (to == address(0)) revert InvalidAddress();
-        if (amount == 0) revert ZeroAmount();
-        if (systemBalances[marketId] < amount) revert InsufficientSystemBalance();
-        systemBalances[marketId] -= amount;
-        _payout(to, amount);
-        emit SystemWithdrawn(marketId, to, amount);
-    }
-
-    /// @notice Credit system cash without debiting a user (e.g. liquidation seize of Balance.margin).
-    function creditSystem(uint256 marketId, uint256 amount) external onlyExchange {
-        if (amount == 0) return;
-        systemBalances[marketId] += amount;
-        emit SystemCredited(marketId, amount);
-    }
-
-    /// @notice Debit system cash (ADL / sync).
-    function debitSystem(uint256 marketId, uint256 amount) external onlyExchange {
-        if (amount == 0) return;
-        if (systemBalances[marketId] < amount) revert InsufficientSystemBalance();
-        systemBalances[marketId] -= amount;
-        emit SystemDebited(marketId, amount);
     }
 
     /// @notice Adjust user shared free balance by signed delta.

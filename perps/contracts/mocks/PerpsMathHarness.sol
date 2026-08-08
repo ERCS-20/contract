@@ -45,4 +45,8 @@ contract PerpsMathHarness {
     ) external pure returns (bool) {
         return PerpsMath.isCollateralized(margin, position, priceX18, minCollateralX18);
     }
+
+    function fundingMarginDelta(int256 indexDelta, int256 position) external pure returns (int256) {
+        return PerpsMath.fundingMarginDelta(indexDelta, position);
+    }
 }
