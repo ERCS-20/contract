@@ -27,15 +27,12 @@ export async function deployPerpsSystem() {
   await vault.write.setClaimFeeDAO([claimFeeDao.account.address]);
   await exchange.write.setOperator([operator.account.address, true]);
   await exchange.write.setLiquidator([liquidator.account.address, true]);
+  await exchange.write.setFactory([deployer.account.address]);
+  await exchange.write.setOracle([oracle.address]);
+  await exchange.write.setFunder([funder.address]);
 
   await oracle.write.setPrice([MARKET_ID, PRICE]);
-  await exchange.write.createMarket([
-    MARKET_ID,
-    oracle.address,
-    funder.address,
-    ADL_THRESHOLD,
-    MIN_COLLATERAL,
-  ]);
+  await exchange.write.createMarket([MARKET_ID, ADL_THRESHOLD, MIN_COLLATERAL]);
 
   const chainId = await publicClient.getChainId();
 

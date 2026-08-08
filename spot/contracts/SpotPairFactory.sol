@@ -32,6 +32,8 @@ contract SpotPairFactory is Ownable {
     address public pairDAO;
     uint256 public pairCount;
     mapping(bytes32 => bool) public spotPairs;
+    /// @notice Native listing fee required by `create` (`msg.value` must equal `fee`). Default 0.
+    uint256 public fee;
 
     /// @notice Emitted when a new spot pair is registered.
     event SpotPairCreated(address indexed baseToken, address indexed quoteToken, uint256 indexed pairIndex);
@@ -41,6 +43,8 @@ contract SpotPairFactory is Ownable {
 
     /// @notice Emitted when the DAO address is removed.
     event PairDAORemoved(address indexed pairDAO);
+
+    event FeeSet(uint256 fee);
 
     uint256 private constant OPENING_PRICE_SCALE = 1e18;
     uint256 private constant MAX_OPENING_PRICE = 1e16;
@@ -55,6 +59,8 @@ contract SpotPairFactory is Ownable {
     error InvalidOpeningPrice();
     error OpeningPriceDecimalsTooHigh();
     error OpeningPriceTooHigh();
+    error IncorrectFee();
+    error TransferFailed();
 
     modifier onlyPairDAO() {
         if (msg.sender != pairDAO) revert NotPairDAO();
@@ -72,6 +78,7 @@ contract SpotPairFactory is Ownable {
         }
         ercs20Factory = IERCS20Factory(ercs20Factory_);
         vault = IGlobalSpotVault(vault_);
+        // fee defaults to 0
     }
 
     /// @notice Sets the DAO address allowed to call two-argument `create`.
@@ -88,9 +95,23 @@ contract SpotPairFactory is Ownable {
         emit PairDAORemoved(pairDAO_);
     }
 
+    /// @notice Sets the native listing fee for `create`.
+    function setFee(uint256 fee_) external onlyOwner {
+        fee = fee_;
+        emit FeeSet(fee_);
+    }
+
+    /// @notice Withdraws accumulated listing fees.
+    function withdraw(address to, uint256 amount) external onlyOwner {
+        if (to == address(0)) revert InvalidAddress();
+        (bool ok,) = to.call{value: amount}("");
+        if (!ok) revert TransferFailed();
+    }
+
     /// @notice Registers an ERCS20 token for spot trading against WUSDC.
     /// @param baseToken ERCS20 token address created by ERCS20Factory.
-    function create(address baseToken) external {
+    function create(address baseToken) external payable {
+        if (msg.value < fee) revert IncorrectFee();
         if (baseToken == address(0)) revert InvalidAddress();
         if (!ercs20Factory.ercs20s(baseToken)) revert NotERCS20();
         if (IERCS20(baseToken).owner() != msg.sender) revert NotTokenOwner();
@@ -99,7 +120,8 @@ contract SpotPairFactory is Ownable {
     }
 
     /// @notice Registers a spot pair with an arbitrary quote token. DAO only.
-    function create(address baseToken, address quoteToken) external onlyPairDAO {
+    function create(address baseToken, address quoteToken) external payable onlyPairDAO {
+        if (msg.value < fee) revert IncorrectFee();
         if (baseToken == address(0) || quoteToken == address(0)) revert InvalidAddress();
         _registerPair(baseToken, quoteToken);
     }

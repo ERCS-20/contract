@@ -149,6 +149,15 @@ contract GlobalPerpsVault is Ownable, Pausable, ReentrancyGuard {
         emit Deposited(msg.sender, amount);
     }
 
+    /// @notice Deposit ARC native USDC into `to`'s shared free collateral. Exchange only.
+    function depositFor(address to) external payable onlyExchange whenNotPaused {
+        if (to == address(0)) revert InvalidAddress();
+        uint256 amount = msg.value;
+        if (amount == 0) revert ZeroAmount();
+        balances[to] += amount;
+        emit Deposited(to, amount);
+    }
+
     function withdraw(uint256 orderId, uint256 amount, bytes calldata signature) external nonReentrant {
         if (amount == 0) revert ZeroAmount();
         if (usedWithdrawOrder[msg.sender][orderId]) revert WithdrawOrderAlreadyUsed();

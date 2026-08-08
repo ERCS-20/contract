@@ -8,6 +8,7 @@ contract MockFundingOracle is IFundingOracle {
     bool public isPositive = true;
     uint256 public ratePerSecondX18;
     uint256 public lastPriceX18;
+    uint256 public lastMarketId;
     uint256 public updateCount;
 
     function setRate(bool positive, uint256 ratePerSecondX18_) external {
@@ -15,7 +16,8 @@ contract MockFundingOracle is IFundingOracle {
         ratePerSecondX18 = ratePerSecondX18_;
     }
 
-    function update(uint256 lastPriceX18_) external returns (bool updated) {
+    function update(uint256 marketId, uint256 lastPriceX18_) external returns (bool updated) {
+        lastMarketId = marketId;
         lastPriceX18 = lastPriceX18_;
         unchecked {
             ++updateCount;
@@ -23,7 +25,7 @@ contract MockFundingOracle is IFundingOracle {
         return true;
     }
 
-    function getFunding(uint256 timeDelta) external view returns (bool, uint256) {
+    function getFunding(uint256, uint256 timeDelta) external view returns (bool, uint256) {
         return (isPositive, ratePerSecondX18 * timeDelta);
     }
 }

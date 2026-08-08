@@ -157,6 +157,76 @@ describe("PerpsExchange", async function () {
     assert.equal(await vault.read.protocolFees(), makerFee + takerFee);
   });
 
+  it("session signer can sign orders for trader", async function () {
+    const ctx = await deployPerpsSystem();
+    const {
+      viem,
+      publicClient,
+      chainId,
+      deployer,
+      maker,
+      taker,
+      operator,
+      exchange,
+      MARKET_ID,
+      PRICE,
+    } = ctx;
+
+    const amount = 1n * COL;
+    const orderMargin = 200n * COL;
+    await fundAndDeposit(ctx, maker, 500n * COL);
+    await fundAndDeposit(ctx, taker, 500n * COL);
+
+    const exchangeAsMaker = await viem.getContractAt("PerpsExchange", exchange.address, {
+      client: { public: publicClient, wallet: maker },
+    });
+    await exchangeAsMaker.write.setSigner([deployer.account.address, true]);
+
+    const expiry = BigInt(Math.floor(Date.now() / 1000) + 3600);
+    const makerOrder = {
+      trader: maker.account.address as Address,
+      marketId: MARKET_ID,
+      amount,
+      margin: orderMargin,
+      priceX18: PRICE,
+      isBuy: false,
+      nonce: 1n,
+      expiry,
+    };
+    const takerOrder = {
+      trader: taker.account.address as Address,
+      marketId: MARKET_ID,
+      amount,
+      margin: orderMargin,
+      priceX18: PRICE,
+      isBuy: true,
+      nonce: 1n,
+      expiry,
+    };
+
+    // Hot session key signs for cold trader; taker still self-signs.
+    const makerSig = await signPerpsOrder(deployer, chainId, exchange.address, makerOrder);
+    const takerSig = await signPerpsOrder(taker, chainId, exchange.address, takerOrder);
+
+    const exchangeAsOp = await viem.getContractAt("PerpsExchange", exchange.address, {
+      client: { public: publicClient, wallet: operator },
+    });
+    await exchangeAsOp.write.settleTrades([
+      [
+        {
+          takerOrder,
+          takerSignature: takerSig,
+          makerOrders: [makerOrder],
+          makerSignatures: [makerSig],
+          fulfillments: [{ amount, priceX18: PRICE }],
+        },
+      ],
+    ]);
+
+    const makerBal = await exchange.read.getBalance([maker.account.address, MARKET_ID]);
+    assert.equal(makerBal[1], -amount);
+  });
+
   it("liquidate reverts when account is still collateralized", async function () {
     const ctx = await deployPerpsSystem();
     const { viem, publicClient, maker, taker, operator, liquidator, exchange, MARKET_ID } = ctx;
@@ -176,7 +246,6 @@ describe("PerpsExchange", async function () {
         MARKET_ID,
         taker.account.address,
         liquidator.account.address,
-        0n,
       ]),
       exchange,
       "NotLiquidatable",
@@ -216,7 +285,6 @@ describe("PerpsExchange", async function () {
       MARKET_ID,
       taker.account.address,
       liquidator.account.address,
-      0n,
     ]);
 
     const takerBal = await exchange.read.getBalance([taker.account.address, MARKET_ID]);
@@ -229,7 +297,7 @@ describe("PerpsExchange", async function () {
     assert.equal(liqBal[1], amount);
   });
 
-  it("liquidate marginTopUp pulls from liquidator vault free balance", async function () {
+  it("liquidator margin stays parked after ADL; removeMargin returns it", async function () {
     const ctx = await deployPerpsSystem();
     const {
       viem,
@@ -247,15 +315,15 @@ describe("PerpsExchange", async function () {
 
     const amount = 1n * COL;
     const orderMargin = 50n * COL;
-    const topUp = 100n * COL;
     await fundAndDeposit(ctx, maker, 500n * COL);
     await fundAndDeposit(ctx, taker, 500n * COL);
-    // Locked buffer + free balance for top-up.
     await fundDepositAndAddMargin(ctx, liquidator, ADL_THRESHOLD);
-    await fundAndDeposit(ctx, liquidator, topUp);
 
     const exchangeAsOp = await viem.getContractAt("PerpsExchange", exchange.address, {
       client: { public: publicClient, wallet: operator },
+    });
+    const exchangeAsLiq = await viem.getContractAt("PerpsExchange", exchange.address, {
+      client: { public: publicClient, wallet: liquidator },
     });
     await settleOne(ctx, exchangeAsOp, maker, taker, amount, orderMargin, 1n, 1n);
 
@@ -264,16 +332,28 @@ describe("PerpsExchange", async function () {
       MARKET_ID,
       taker.account.address,
       liquidator.account.address,
-      topUp,
     ]);
 
-    const liqBal = await exchange.read.getBalance([liquidator.account.address, MARKET_ID]);
-    assert.equal(liqBal[0], ADL_THRESHOLD + topUp);
-    assert.equal(liqBal[1], amount);
-    assert.equal(await vault.read.balances([liquidator.account.address]), 0n);
+    // ADL closes L inventory; margin must remain parked (not auto-returned).
+    await exchangeAsOp.write.executeAdl([
+      MARKET_ID,
+      maker.account.address,
+      liquidator.account.address,
+      amount,
+      true,
+    ]);
+    let liqBal = await exchange.read.getBalance([liquidator.account.address, MARKET_ID]);
+    assert.equal(liqBal[1], 0n);
+    assert.ok(liqBal[0] > 0n);
+    const parkedMargin = liqBal[0];
+
+    const beforeVault = await vault.read.balances([liquidator.account.address]);
+    await exchangeAsLiq.write.removeMargin([MARKET_ID, parkedMargin]);
+    liqBal = await exchange.read.getBalance([liquidator.account.address, MARKET_ID]);
+    assert.equal(liqBal[0], 0n);
     assert.equal(
-      await exchange.read.isAdlTriggered([MARKET_ID, liquidator.account.address]),
-      false,
+      await vault.read.balances([liquidator.account.address]),
+      beforeVault + parkedMargin,
     );
   });
 
@@ -310,7 +390,6 @@ describe("PerpsExchange", async function () {
       MARKET_ID,
       taker.account.address,
       liquidator.account.address,
-      0n,
     ]);
 
     assert.equal(

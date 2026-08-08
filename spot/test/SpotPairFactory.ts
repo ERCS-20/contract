@@ -49,6 +49,19 @@ describe("SpotPairFactory", async function () {
     assert.equal((await pairFactory.read.vault()).toLowerCase(), vault.address.toLowerCase());
     assert.equal(await pairFactory.read.pairCount(), 0n);
     assert.equal(await pairFactory.read.pairDAO(), "0x0000000000000000000000000000000000000000");
+    assert.equal(await pairFactory.read.fee(), 0n);
+  });
+
+  it("create reverts when listing fee is wrong", async function () {
+    const { viem, pairFactory, mockFactory } = await deployPairFactory();
+    const ercs20 = await registerErcs20(viem, mockFactory);
+    await pairFactory.write.setFee([1000n]);
+
+    await viem.assertions.revertWithCustomError(
+      pairFactory.write.create([ercs20.address], { value: 0n }),
+      pairFactory,
+      "IncorrectFee",
+    );
   });
 
   it("constructor reverts for zero ercs20Factory", async function () {
