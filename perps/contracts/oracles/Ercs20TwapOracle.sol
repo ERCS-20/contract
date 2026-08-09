@@ -9,7 +9,7 @@ import {IErcs20Reserves} from "../interfaces/IErcs20Reserves.sol";
 
 /// @title Ercs20TwapOracle
 /// @notice Multi-market mark price = TWAP of each market's ERCS20 spot mid over `window`.
-/// @dev Samples via `update(marketId)` (PerpsExchange / operator). Bind spot with `setErcs20`.
+/// @dev Samples via `update(marketId, ercs20)` from PerpsExchange. Spot address is not stored here.
 contract Ercs20TwapOracle is Ownable, IPerpsOracle, IOracleSampler {
     uint256 public constant BASE = 1e18;
     uint256 internal constant CARDINALITY = 32;
@@ -20,7 +20,6 @@ contract Ercs20TwapOracle is Ownable, IPerpsOracle, IOracleSampler {
     }
 
     struct MarketState {
-        address ercs20;
         uint256 priceCumulative;
         uint256 lastMidX18;
         uint256 lastSampleAt;
@@ -30,7 +29,6 @@ contract Ercs20TwapOracle is Ownable, IPerpsOracle, IOracleSampler {
     }
 
     address public immutable exchange;
-    address public factory;
     /// @notice TWAP window (default 15 minutes).
     uint256 public immutable window;
     /// @notice Minimum seconds between samples (default 30).
@@ -38,25 +36,16 @@ contract Ercs20TwapOracle is Ownable, IPerpsOracle, IOracleSampler {
 
     mapping(uint256 => MarketState) internal _markets;
 
-    event FactorySet(address indexed factory);
-    event Ercs20Set(uint256 indexed marketId, address indexed ercs20);
     event MarkSampled(
         uint256 indexed marketId, uint256 spotX18, uint256 priceCumulative, uint256 timestamp
     );
 
     error NotExchange();
-    error NotFactory();
     error ZeroAddress();
     error NotReady();
-    error MarketNotBound();
 
     modifier onlyExchange() {
         if (msg.sender != exchange) revert NotExchange();
-        _;
-    }
-
-    modifier onlyFactory() {
-        if (msg.sender != factory) revert NotFactory();
         _;
     }
 
@@ -65,23 +54,6 @@ contract Ercs20TwapOracle is Ownable, IPerpsOracle, IOracleSampler {
         exchange = exchange_;
         window = window_ == 0 ? 15 minutes : window_;
         minSampleInterval = minSampleInterval_ == 0 ? 30 : minSampleInterval_;
-    }
-
-    function setFactory(address factory_) external onlyOwner {
-        if (factory_ == address(0)) revert ZeroAddress();
-        factory = factory_;
-        emit FactorySet(factory_);
-    }
-
-    /// @notice Bind or update the ERCS20 spot pool for a perps `marketId`.
-    function setErcs20(uint256 marketId, address ercs20_) external onlyFactory {
-        if (ercs20_ == address(0)) revert ZeroAddress();
-        _markets[marketId].ercs20 = ercs20_;
-        emit Ercs20Set(marketId, ercs20_);
-    }
-
-    function ercs20(uint256 marketId) external view returns (address) {
-        return _markets[marketId].ercs20;
     }
 
     function lastMidX18(uint256 marketId) external view returns (uint256) {
@@ -93,14 +65,14 @@ contract Ercs20TwapOracle is Ownable, IPerpsOracle, IOracleSampler {
     }
 
     /// @inheritdoc IOracleSampler
-    function update(uint256 marketId) external onlyExchange returns (bool updated) {
+    function update(uint256 marketId, address ercs20) external onlyExchange returns (bool updated) {
+        if (ercs20 == address(0)) revert ZeroAddress();
         MarketState storage m = _markets[marketId];
-        if (m.ercs20 == address(0)) revert MarketNotBound();
         if (m.lastSampleAt != 0 && block.timestamp < m.lastSampleAt + minSampleInterval) {
             return false;
         }
 
-        uint256 spotX18 = _spotMid(m.ercs20);
+        uint256 spotX18 = _spotMid(ercs20);
         uint32 now32 = uint32(block.timestamp);
 
         if (m.lastSampleAt != 0) {
@@ -119,7 +91,6 @@ contract Ercs20TwapOracle is Ownable, IPerpsOracle, IOracleSampler {
     /// @inheritdoc IPerpsOracle
     function getPrice(uint256 marketId) external view returns (uint256 priceX18) {
         MarketState storage m = _markets[marketId];
-        if (m.ercs20 == address(0)) revert MarketNotBound();
         if (m.observationCount == 0 || m.lastSampleAt == 0) revert NotReady();
 
         uint256 nowTs = block.timestamp;

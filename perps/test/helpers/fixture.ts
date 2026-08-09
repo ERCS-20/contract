@@ -32,7 +32,13 @@ export async function deployPerpsSystem() {
   await exchange.write.setFunder([funder.address]);
 
   await oracle.write.setPrice([MARKET_ID, PRICE]);
-  await exchange.write.createMarket([MARKET_ID, ADL_THRESHOLD, MIN_COLLATERAL]);
+  // Placeholder ERCS20; mock oracles do not read reserves from it.
+  await exchange.write.createMarket([
+    MARKET_ID,
+    "0x0000000000000000000000000000000000000001",
+    ADL_THRESHOLD,
+    MIN_COLLATERAL,
+  ]);
 
   const chainId = await publicClient.getChainId();
 

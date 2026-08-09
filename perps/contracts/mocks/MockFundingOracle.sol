@@ -16,7 +16,7 @@ contract MockFundingOracle is IFundingOracle {
         ratePerSecondX18 = ratePerSecondX18_;
     }
 
-    function update(uint256 marketId, uint256 lastPriceX18_) external returns (bool updated) {
+    function update(uint256 marketId, uint256 lastPriceX18_, address) external returns (bool updated) {
         lastMarketId = marketId;
         lastPriceX18 = lastPriceX18_;
         unchecked {

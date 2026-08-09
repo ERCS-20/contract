@@ -17,27 +17,22 @@ interface IERCS20 {
 }
 
 interface IPerpsExchange {
-    function createMarket(uint256 marketId, uint256 adlEquityThreshold, uint256 minCollateralX18) external;
+    function createMarket(uint256 marketId, address ercs20, uint256 adlEquityThreshold, uint256 minCollateralX18)
+        external;
     function seedInsuranceMargin(uint256 marketId, address account) external payable;
 }
 
-interface IErcs20Binder {
-    function setErcs20(uint256 marketId, address ercs20) external;
-}
-
 /// @title PerpsPairFactory
-/// @notice Creates perps markets for ERCS20 underlyings and binds TWAP / funding oracles.
+/// @notice Creates perps markets for ERCS20 underlyings.
 /// @dev
 /// - Public `create(baseToken)` for ERCS20 token owners (verified via ERCS20Factory).
 /// - pairDAO-only `create(baseToken, adlEquityThreshold, minCollateralX18)` with custom params.
 /// - Default ADL threshold is `fee / 2` (half of listing-fee insurance seed).
 /// - Listing `fee` is forwarded to PerpsExchange.seedInsuranceMargin for `insuranceAccount`.
-/// - This contract must be `factory` on PerpsExchange, Ercs20TwapOracle, and Ercs20FundingOracle.
+/// - ERCS20 is stored on PerpsExchange.Market (oracles receive it per call; no oracle rebinding on upgrade).
 contract PerpsPairFactory is Ownable {
     IERCS20Factory public immutable ercs20Factory;
     IPerpsExchange public immutable exchange;
-    IErcs20Binder public immutable twapOracle;
-    IErcs20Binder public immutable fundingOracle;
 
     address public pairDAO;
     /// @notice Cold liquidator account that receives listing-fee insurance margin.
@@ -92,17 +87,11 @@ contract PerpsPairFactory is Ownable {
         _;
     }
 
-    constructor(address ercs20Factory_, address exchange_, address twapOracle_, address fundingOracle_)
-        Ownable(msg.sender)
-    {
-        if (ercs20Factory_ == address(0) || exchange_ == address(0) || twapOracle_ == address(0) || fundingOracle_ == address(0)) {
-            revert InvalidAddress();
-        }
+    constructor(address ercs20Factory_, address exchange_) Ownable(msg.sender) {
+        if (ercs20Factory_ == address(0) || exchange_ == address(0)) revert InvalidAddress();
 
         ercs20Factory = IERCS20Factory(ercs20Factory_);
         exchange = IPerpsExchange(exchange_);
-        twapOracle = IErcs20Binder(twapOracle_);
-        fundingOracle = IErcs20Binder(fundingOracle_);
         defaultMinCollateralX18 = DEFAULT_MIN_COLLATERAL_X18;
         fee = DEFAULT_FEE;
     }
@@ -154,7 +143,7 @@ contract PerpsPairFactory is Ownable {
         payable
         onlyPairDAO
     {
-        if (msg.value < fee) revert IncorrectFee();
+        if (msg.value != fee) revert IncorrectFee();
         if (baseToken == address(0)) revert InvalidAddress();
         if (minCollateralX18 < PerpsTypes.BASE) revert InvalidMinCollateral();
         _createMarket(baseToken, adlEquityThreshold, minCollateralX18);
@@ -167,9 +156,7 @@ contract PerpsPairFactory is Ownable {
 
         uint256 marketId = marketCount++;
 
-        twapOracle.setErcs20(marketId, baseToken);
-        fundingOracle.setErcs20(marketId, baseToken);
-        exchange.createMarket(marketId, adlEquityThreshold, minCollateralX18);
+        exchange.createMarket(marketId, baseToken, adlEquityThreshold, minCollateralX18);
 
         if (fee > 0) {
             exchange.seedInsuranceMargin{value: fee}(marketId, insurance);

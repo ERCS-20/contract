@@ -17,6 +17,8 @@ library PerpsTypes {
     }
 
     struct Market {
+        /// @notice Underlying ERCS20 spot pool.
+        address ercs20;
         bool exists;
         bool paused;
         /// @notice ADL trigger: liquidator Balance.margin ≤ this (absolute USDC units).

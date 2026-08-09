@@ -28,14 +28,10 @@ describe("PerpsPairFactory", async function () {
     const pairFactory = await viem.deployContract("PerpsPairFactory", [
       mockErcs20Factory.address,
       exchange.address,
-      twap.address,
-      funder.address,
     ]);
 
     await exchange.write.setFactory([pairFactory.address]);
     await exchange.write.setLiquidator([liquidator.account.address, true]);
-    await twap.write.setFactory([pairFactory.address]);
-    await funder.write.setFactory([pairFactory.address]);
     await pairFactory.write.setPairDAO([pairDao.account.address]);
     await pairFactory.write.setInsuranceAccount([liquidator.account.address]);
 
@@ -107,16 +103,14 @@ describe("PerpsPairFactory", async function () {
     assert.equal(liqBal[1], 0n);
 
     const market = await exchange.read.markets([0n]);
-    assert.equal(market[0], true); // exists
-    assert.equal(market[1], false); // paused
-    assert.equal(market[2], DEFAULT_ADL); // adlEquityThreshold = fee / 2
-    assert.equal(market[3], DEFAULT_MIN_COLLATERAL);
+    assert.equal(market[0].toLowerCase(), token.address.toLowerCase()); // ercs20
+    assert.equal(market[1], true); // exists
+    assert.equal(market[2], false); // paused
+    assert.equal(market[3], DEFAULT_ADL); // adlEquityThreshold = fee / 2
+    assert.equal(market[4], DEFAULT_MIN_COLLATERAL);
     assert.equal(await pairFactory.read.defaultMinCollateralX18(), DEFAULT_MIN_COLLATERAL);
     assert.equal((await exchange.read.oracle()).toLowerCase(), twap.address.toLowerCase());
     assert.equal((await exchange.read.funder()).toLowerCase(), funder.address.toLowerCase());
-
-    assert.equal((await twap.read.ercs20([0n])).toLowerCase(), token.address.toLowerCase());
-    assert.equal((await funder.read.markets([0n]))[0].toLowerCase(), token.address.toLowerCase());
   });
 
   it("reverts when listing fee is wrong", async function () {
@@ -141,19 +135,13 @@ describe("PerpsPairFactory", async function () {
     const exchange = await viem.deployContract("PerpsExchange", []);
     const vault = await viem.deployContract("GlobalPerpsVault", [exchange.address]);
     await exchange.write.setVault([vault.address]);
-    const twap = await viem.deployContract("Ercs20TwapOracle", [exchange.address, 15n * 60n, 30n]);
-    const funder = await viem.deployContract("Ercs20FundingOracle", [exchange.address, 5n * 60n]);
     const mockErcs20Factory = await viem.deployContract("MockERCS20Factory", []);
     const pairFactory = await viem.deployContract("PerpsPairFactory", [
       mockErcs20Factory.address,
       exchange.address,
-      twap.address,
-      funder.address,
     ]);
     await exchange.write.setFactory([pairFactory.address]);
     await exchange.write.setLiquidator([liquidator.account.address, true]);
-    await twap.write.setFactory([pairFactory.address]);
-    await funder.write.setFactory([pairFactory.address]);
 
     const token = await viem.deployContract("MockERCS20WithSeed", [1n * 10n ** 15n, 1n * COL], {
       client: { wallet: tokenOwner },
@@ -197,8 +185,10 @@ describe("PerpsPairFactory", async function () {
     await factoryAsDao.write.create([token.address, customAdl, customMin], { value: DEFAULT_FEE });
 
     const market = await exchange.read.markets([0n]);
-    assert.equal(market[2], customAdl); // adlEquityThreshold
-    assert.equal(market[3], customMin); // minCollateralX18
+    assert.equal(market[0].toLowerCase(), token.address.toLowerCase());
+    assert.equal(market[1], true); // exists
+    assert.equal(market[3], customAdl); // adlEquityThreshold
+    assert.equal(market[4], customMin); // minCollateralX18
   });
 
   it("reverts on duplicate market", async function () {

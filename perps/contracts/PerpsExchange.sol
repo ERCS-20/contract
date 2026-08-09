@@ -59,7 +59,9 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     event LiquidatorSet(address indexed account, bool allowed);
     event SignerSet(address indexed trader, address indexed signer, bool allowed);
     event InsuranceSeeded(uint256 indexed marketId, address indexed account, uint256 amount);
-    event MarketCreated(uint256 indexed marketId, uint256 adlEquityThreshold, uint256 minCollateralX18);
+    event MarketCreated(
+        uint256 indexed marketId, address indexed ercs20, uint256 adlEquityThreshold, uint256 minCollateralX18
+    );
     event MarketPaused(uint256 indexed marketId, bool paused);
     event AdlThresholdSet(uint256 indexed marketId, uint256 threshold);
     event OracleSet(address indexed oracle);
@@ -194,13 +196,15 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         _unpause();
     }
 
-    function createMarket(uint256 marketId, uint256 adlEquityThreshold, uint256 minCollateralX18)
+    function createMarket(uint256 marketId, address ercs20, uint256 adlEquityThreshold, uint256 minCollateralX18)
         external
         onlyFactory
     {
+        if (ercs20 == address(0)) revert ZeroAddress();
         if (markets[marketId].exists) revert MarketExists();
         if (minCollateralX18 < PerpsTypes.BASE) revert InvalidMinCollateral();
         markets[marketId] = PerpsTypes.Market({
+            ercs20: ercs20,
             exists: true,
             paused: false,
             adlEquityThreshold: adlEquityThreshold,
@@ -208,7 +212,7 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
             lastPriceX18: 0
         });
         fundingIndex[marketId] = PerpsTypes.FundingIndex({timestamp: block.timestamp, value: 0});
-        emit MarketCreated(marketId, adlEquityThreshold, minCollateralX18);
+        emit MarketCreated(marketId, ercs20, adlEquityThreshold, minCollateralX18);
     }
 
     /// @notice Factory listing fee → vault free balance of `account` → market Balance.margin.
@@ -520,7 +524,7 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
 
     function _sampleFunding(uint256 marketId, PerpsTypes.Market storage m) private {
         if (funder == address(0) || m.lastPriceX18 == 0) return;
-        bool updated = IFundingOracle(funder).update(marketId, m.lastPriceX18);
+        bool updated = IFundingOracle(funder).update(marketId, m.lastPriceX18, m.ercs20);
         emit FundingSampled(marketId, m.lastPriceX18, updated);
     }
 
@@ -528,7 +532,8 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     function _sampleMark(uint256 marketId) private {
         address oracle_ = oracle;
         if (oracle_ == address(0)) return;
-        try IOracleSampler(oracle_).update(marketId) returns (bool updated) {
+        address ercs20 = markets[marketId].ercs20;
+        try IOracleSampler(oracle_).update(marketId, ercs20) returns (bool updated) {
             emit MarkSampled(marketId, updated);
         } catch {}
     }
