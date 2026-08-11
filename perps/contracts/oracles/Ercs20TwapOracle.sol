@@ -13,6 +13,8 @@ import {IErcs20Reserves} from "../interfaces/IErcs20Reserves.sol";
 contract Ercs20TwapOracle is Ownable, IPerpsOracle, IOracleSampler {
     uint256 public constant BASE = 1e18;
     uint256 internal constant CARDINALITY = 32;
+    uint256 public constant WINDOW = 15 minutes;
+    uint256 public constant MIN_SAMPLE_INTERVAL = 30;
 
     struct Observation {
         uint32 timestamp;
@@ -49,11 +51,11 @@ contract Ercs20TwapOracle is Ownable, IPerpsOracle, IOracleSampler {
         _;
     }
 
-    constructor(address exchange_, uint256 window_, uint256 minSampleInterval_) Ownable(msg.sender) {
+    constructor(address exchange_) Ownable(msg.sender) {
         if (exchange_ == address(0)) revert ZeroAddress();
         exchange = exchange_;
-        window = window_ == 0 ? 15 minutes : window_;
-        minSampleInterval = minSampleInterval_ == 0 ? 30 : minSampleInterval_;
+        window = WINDOW;
+        minSampleInterval = MIN_SAMPLE_INTERVAL;
     }
 
     function lastMidX18(uint256 marketId) external view returns (uint256) {

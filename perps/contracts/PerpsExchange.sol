@@ -23,7 +23,6 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     using ECDSA for bytes32;
 
     GlobalPerpsVault public vault;
-    address public pauseDAO;
     address public factory;
     /// @notice Shared mark oracle for all markets (e.g. Ercs20TwapOracle).
     address public oracle;
@@ -34,17 +33,23 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     uint256 public constant FEE_DENOMINATOR = 10_000;
     uint256 public constant MAKER_FEE_NUMERATOR = 2;
     uint256 public constant TAKER_FEE_NUMERATOR = 5;
+    /// @notice After final settlement is enabled, users have this long to self-withdraw before DAO may reclaim the pot.
+    uint256 public constant FINAL_SETTLEMENT_LOCK = 300 days;
     bytes32 public immutable DOMAIN_SEPARATOR;
     bytes32 public constant ORDER_TYPEHASH = keccak256(
         "Order(address trader,uint256 marketId,uint256 amount,uint256 margin,uint256 priceX18,bool isBuy,uint256 nonce,uint256 expiry)"
     );
 
+    /// @notice Protocol DAOs authorized for admin configuration (vault, oracles, pause, etc.).
+    mapping(address => bool) public dao;
     mapping(address => bool) public isOperator;
     /// @notice Global liquidator allowlist (same L set for all markets).
     mapping(address => bool) public isLiquidator;
     /// @notice Session signers: trader => signer => allowed to sign Order for trader.
     mapping(address => mapping(address => bool)) public isSigner;
     mapping(uint256 => PerpsTypes.Market) public markets;
+    /// @notice Final settlement config per market (only read after enable).
+    mapping(uint256 => PerpsTypes.MarketSettlement) public marketSettlements;
     mapping(address => mapping(uint256 => PerpsTypes.Balance)) public balances;
     mapping(bytes32 => uint256) public filledAmount;
     /// @notice Per-market continuous funding index.
@@ -53,7 +58,7 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     mapping(address => mapping(uint256 => PerpsTypes.FundingIndex)) public localFundingIndex;
 
     event VaultSet(address indexed vault);
-    event PauseDAOSet(address indexed dao);
+    event DAOSet(address indexed account, bool allowed);
     event FactorySet(address indexed factory);
     event OperatorSet(address indexed account, bool allowed);
     event LiquidatorSet(address indexed account, bool allowed);
@@ -83,13 +88,12 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         uint256 takerFee
     );
     event MarginAdded(address indexed user, uint256 indexed marketId, uint256 amount);
-    event MarginRemoved(address indexed user, uint256 indexed marketId, uint256 amount);
     event Liquidated(
         uint256 indexed marketId,
         address indexed user,
         address indexed liquidator,
         int256 position,
-        uint256 marginSeized,
+        int256 marginSeized,
         uint256 markPriceX18
     );
     event AdlExecuted(
@@ -99,14 +103,20 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         int256 closedSize,
         uint256 priceX18
     );
+    event FinalSettlementEnabled(uint256 indexed marketId, uint256 settlementPriceX18, uint256 lockedAt);
+    event FinalSettlementWithdrawn(address indexed user, uint256 indexed marketId, uint256 amount);
+    event FinalSettlementPotReclaimed(uint256 indexed marketId, address indexed to, uint256 amount);
 
     error NotOperator();
-    error NotPauseDAO();
+    error NotDAO();
     error NotFactory();
+    error NotFactoryOrLiquidator();
     error ZeroAddress();
     error MarketExists();
     error MarketNotFound();
     error MarketIsPaused();
+    error FinalSettlementNotEnabled();
+    error FinalSettlementLockActive();
     error ZeroAmount();
     error OrderExpired();
     error OrderOverfilled();
@@ -116,11 +126,11 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     error InvalidFill();
     error PriceInvalid();
     error OrderMismatch();
-    error InsufficientMargin();
     error NotLiquidatable();
     error InvalidMinCollateral();
     error CannotLiquidateNegativeAccount();
     error NotLiquidator();
+    error LiquidatorCannotTake();
     error FunderNotSet();
     error NoLastPrice();
 
@@ -129,8 +139,8 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         _;
     }
 
-    modifier onlyPauseDAO() {
-        if (msg.sender != pauseDAO) revert NotPauseDAO();
+    modifier onlyDAO() {
+        if (!dao[msg.sender]) revert NotDAO();
         _;
     }
 
@@ -155,22 +165,24 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         );
     }
 
-    function setVault(address vault_) external onlyOwner {
+    /// @notice Grant or revoke DAO admin rights. Owner only.
+    function setDAO(address account, bool allowed) external onlyOwner {
+        if (account == address(0)) revert ZeroAddress();
+        dao[account] = allowed;
+        emit DAOSet(account, allowed);
+    }
+
+    function setVault(address vault_) external onlyDAO {
         vault = GlobalPerpsVault(vault_);
         emit VaultSet(vault_);
     }
 
-    function setPauseDAO(address dao) external onlyOwner {
-        pauseDAO = dao;
-        emit PauseDAOSet(dao);
-    }
-
-    function setOperator(address account, bool allowed) external onlyOwner {
+    function setOperator(address account, bool allowed) external onlyDAO {
         isOperator[account] = allowed;
         emit OperatorSet(account, allowed);
     }
 
-    function setLiquidator(address account, bool allowed) external onlyOwner {
+    function setLiquidator(address account, bool allowed) external onlyDAO {
         isLiquidator[account] = allowed;
         emit LiquidatorSet(account, allowed);
     }
@@ -186,14 +198,6 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         if (factory_ == address(0)) revert ZeroAddress();
         factory = factory_;
         emit FactorySet(factory_);
-    }
-
-    function pause() external onlyPauseDAO {
-        _pause();
-    }
-
-    function unpause() external onlyPauseDAO {
-        _unpause();
     }
 
     function createMarket(uint256 marketId, address ercs20, uint256 adlEquityThreshold, uint256 minCollateralX18)
@@ -215,66 +219,115 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         emit MarketCreated(marketId, ercs20, adlEquityThreshold, minCollateralX18);
     }
 
-    /// @notice Factory listing fee → vault free balance of `account` → market Balance.margin.
-    /// @dev `account` must be an approved liquidator (cold insurance account).
-    function seedInsuranceMargin(uint256 marketId, address account)
-        external
-        payable
-        onlyFactory
-        whenNotPaused
-        nonReentrant
-    {
+    /// @notice Enable or update final settlement at an off-chain-chosen `settlementPriceX18`.
+    /// @dev Only flips storage + pause — no funding/oracle — so enable cannot get stuck.
+    ///      Owner may call again to correct the price; `lockedAt` is set only on first enable.
+    function enableFinalSettlement(uint256 marketId, uint256 settlementPriceX18) external onlyOwner {
+        if (settlementPriceX18 == 0) revert PriceInvalid();
+
+        _market(marketId).paused = true;
+        PerpsTypes.MarketSettlement storage s = marketSettlements[marketId];
+        if (!s.enabled) {
+            s.enabled = true;
+            s.lockedAt = block.timestamp;
+        }
+        s.settlementPriceX18 = settlementPriceX18;
+        emit FinalSettlementEnabled(marketId, settlementPriceX18, s.lockedAt);
+    }
+
+    /// @notice Close caller's Balance at settlement price; positive equity → vault free.
+    /// @dev Underwater (equity ≤ 0): wipe Balance, no payout. Pot must cover solvent payouts
+    ///      (flat book ⇒ choose price / clear underwater off-chain so Σ max(equity,0) ≤ pot).
+    function withdrawFinalSettlement(uint256 marketId) external nonReentrant {
+        PerpsTypes.MarketSettlement storage s = marketSettlements[marketId];
+        if (!s.enabled) revert FinalSettlementNotEnabled();
+
+        PerpsTypes.Balance memory userBal = balances[msg.sender][marketId];
+        if (userBal.margin == 0 && userBal.position == 0) revert ZeroAmount();
+
+        int256 eq = PerpsMath.equity(userBal.margin, userBal.position, s.settlementPriceX18);
+        _clearBalance(msg.sender, marketId);
+
+        uint256 payout;
+        if (eq > 0) {
+            payout = uint256(eq);
+            vault.adjustUserBalance(msg.sender, marketId, eq);
+        }
+
+        emit FinalSettlementWithdrawn(msg.sender, marketId, payout);
+    }
+
+    /// @notice After `FINAL_SETTLEMENT_LOCK`, DAO moves the entire leftover market pot to its vault free balance.
+    function reclaimFinalSettlementPot(uint256 marketId) external onlyDAO nonReentrant {
+        PerpsTypes.MarketSettlement storage s = marketSettlements[marketId];
+        if (!s.enabled) revert FinalSettlementNotEnabled();
+        if (block.timestamp < s.lockedAt + FINAL_SETTLEMENT_LOCK) revert FinalSettlementLockActive();
+
+        uint256 amount = vault.marketPots(marketId);
+        if (amount == 0) revert ZeroAmount();
+
+        vault.adjustUserBalance(msg.sender, marketId, int256(amount));
+        emit FinalSettlementPotReclaimed(marketId, msg.sender, amount);
+    }
+
+    /// @notice Deposit native USDC into a liquidator's market Balance.margin.
+    /// @dev Callable by `factory` (any liquidator `account`) or by a liquidator funding themselves.
+    function seedInsuranceMargin(uint256 marketId, address account) external payable {
+        if (msg.sender != factory && !isLiquidator[msg.sender]) revert NotFactoryOrLiquidator();
         if (!isLiquidator[account]) revert NotLiquidator();
+        if (msg.sender != factory && account != msg.sender) revert NotLiquidator();
+
         uint256 amount = msg.value;
         if (amount == 0) revert ZeroAmount();
         _requireMarket(marketId);
 
         vault.depositFor{value: amount}(account);
-        vault.adjustUserBalance(account, -int256(amount));
+        vault.adjustUserBalance(account, marketId, -int256(amount));
         _creditMargin(account, marketId, int256(amount));
 
         emit MarginAdded(account, marketId, amount);
         emit InsuranceSeeded(marketId, account, amount);
     }
 
-    function setMinCollateral(uint256 marketId, uint256 minCollateralX18) external onlyOwner {
+    function setMinCollateral(uint256 marketId, uint256 minCollateralX18) external onlyDAO {
         _requireMarket(marketId);
         if (minCollateralX18 < PerpsTypes.BASE) revert InvalidMinCollateral();
         markets[marketId].minCollateralX18 = minCollateralX18;
     }
 
-    function setMarketPaused(uint256 marketId, bool paused_) external onlyOwner {
+    function setMarketPaused(uint256 marketId, bool paused_) external onlyDAO {
         _requireMarket(marketId);
         markets[marketId].paused = paused_;
         emit MarketPaused(marketId, paused_);
     }
 
-    function setAdlEquityThreshold(uint256 marketId, uint256 threshold) external onlyOwner {
+    function setAdlEquityThreshold(uint256 marketId, uint256 threshold) external onlyDAO {
         _requireMarket(marketId);
         markets[marketId].adlEquityThreshold = threshold;
         emit AdlThresholdSet(marketId, threshold);
     }
 
-    function setOracle(address oracle_) external onlyOwner {
+    function setOracle(address oracle_) external onlyDAO {
         oracle = oracle_;
         emit OracleSet(oracle_);
     }
 
-    function setFunder(address funder_) external onlyOwner {
+    function setFunder(address funder_) external onlyDAO {
         funder = funder_;
         emit FunderSet(funder_);
     }
 
     /// @notice Advance market funding index and settle funding for `account` into Balance.margin.
-    function settleFunding(address account, uint256 marketId) external whenNotPaused nonReentrant {
-        _requireMarket(marketId);
+    function settleFunding(address account, uint256 marketId) external {
+        PerpsTypes.Market storage m = _market(marketId);
+        if (m.paused) revert MarketIsPaused();
         PerpsTypes.FundingIndex memory index = _advanceFundingIndex(marketId);
         _settleAccountFunding(account, marketId, index);
     }
 
     /// @notice Accrue funding index with the cached rate, then resample rate from `lastPriceX18`.
     /// @dev onlyOperator: avoids flash-loan spot + public sample. Use when idle (no trades).
-    function updateFunding(uint256 marketId) external onlyOperator whenNotPaused nonReentrant {
+    function updateFunding(uint256 marketId) external onlyOperator {
         PerpsTypes.Market storage m = _market(marketId);
         if (m.lastPriceX18 == 0) revert NoLastPrice();
 
@@ -284,46 +337,25 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     }
 
     /// @notice Sample mark oracle (TWAP cumulative) when idle. no-op if oracle has no sampler.
-    function updateMark(uint256 marketId) external onlyOperator whenNotPaused nonReentrant {
+    function updateMark(uint256 marketId) external onlyOperator {
         _requireMarket(marketId);
         _sampleMark(marketId);
     }
 
-    function getLastPrice(uint256 marketId) external view returns (uint256) {
-        return _market(marketId).lastPriceX18;
-    }
-
     /// @notice Move free vault collateral into this market's Balance.margin.
-    function addMargin(uint256 marketId, uint256 amount) external whenNotPaused nonReentrant {
-        _requireMarket(marketId);
+    function addMargin(uint256 marketId, uint256 amount) external nonReentrant {
+        PerpsTypes.Market storage m = _market(marketId);
+        if (m.paused) revert MarketIsPaused();
         if (amount == 0) revert ZeroAmount();
         PerpsTypes.FundingIndex memory index = _advanceFundingIndex(marketId);
         _settleAccountFunding(msg.sender, marketId, index);
-        vault.adjustUserBalance(msg.sender, -int256(amount));
+        vault.adjustUserBalance(msg.sender, marketId, -int256(amount));
         _creditMargin(msg.sender, marketId, int256(amount));
         emit MarginAdded(msg.sender, marketId, amount);
     }
 
-    /// @notice Move Balance.margin back to free vault collateral.
-    function removeMargin(uint256 marketId, uint256 amount) external whenNotPaused nonReentrant {
-        _requireMarket(marketId);
-        if (amount == 0) revert ZeroAmount();
-        PerpsTypes.FundingIndex memory index = _advanceFundingIndex(marketId);
-        _settleAccountFunding(msg.sender, marketId, index);
-        PerpsTypes.Balance storage b = balances[msg.sender][marketId];
-        if (b.margin < int256(amount)) revert InsufficientMargin();
-        b.margin -= int256(amount);
-        vault.adjustUserBalance(msg.sender, int256(amount));
-        emit MarginRemoved(msg.sender, marketId, amount);
-    }
-
     /// @dev Prefer one market per call. `lastPrice` / funding sample use the last settlement's last fill.
-    function settleTrades(PerpsTypes.TradeSettlement[] calldata settlements)
-        external
-        onlyOperator
-        whenNotPaused
-        nonReentrant
-    {
+    function settleTrades(PerpsTypes.TradeSettlement[] calldata settlements) external onlyOperator {
         uint256 length = settlements.length;
         for (uint256 i; i < length;) {
             _settleTrades(settlements[i]);
@@ -345,18 +377,11 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         _sampleMark(marketId);
     }
 
-    /// @notice Liquidate user into `liquidator`: merge position, seize positive margin.
-    /// @dev L keeps Balance.margin parked (not auto-returned); fund L via `addMargin` beforehand.
-    function liquidate(uint256 marketId, address user, address liquidator)
-        external
-        onlyOperator
-        whenNotPaused
-        nonReentrant
-    {
+    /// @notice Liquidate user into `liquidator`: merge full Balance (margin + position, signed).
+    /// @dev Reverts if L mark equity would be negative after the merge (fund L first).
+    function liquidate(uint256 marketId, address user, address liquidator) external onlyOperator  {
         if (!isLiquidator[liquidator]) revert NotLiquidator();
-
         PerpsTypes.Market storage m = _market(marketId);
-        if (m.paused) revert MarketIsPaused();
 
         PerpsTypes.FundingIndex memory index = _advanceFundingIndex(marketId);
         _settleAccountFunding(user, marketId, index);
@@ -364,7 +389,6 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
 
         PerpsTypes.Balance memory userBal = balances[user][marketId];
         if (userBal.position == 0) revert NothingToLiquidate();
-
         uint256 mark = IPerpsOracle(oracle).getPrice(marketId);
 
         // Cannot liquidate when margin and position are both negative.
@@ -374,17 +398,17 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         }
 
         PerpsTypes.Balance memory liqBal = balances[liquidator][marketId];
-        uint256 seized;
-        if (userBal.margin > 0) {
-            seized = uint256(userBal.margin);
-            liqBal.margin += userBal.margin;
-        }
+        liqBal.margin += userBal.margin;
         liqBal.position += userBal.position;
+
+        if (PerpsMath.equity(liqBal.margin, liqBal.position, mark) < 0) {
+            revert LiquidatorCannotTake();
+        }
 
         _setBalance(liquidator, marketId, liqBal);
         _clearBalance(user, marketId);
 
-        emit Liquidated(marketId, user, liquidator, userBal.position, seized, mark);
+        emit Liquidated(marketId, user, liquidator, userBal.position, userBal.margin, mark);
     }
 
     /// @notice ADL: force trade user against liquidator at mark when L margin ≤ threshold.
@@ -394,12 +418,9 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         address liquidator,
         uint256 amount,
         bool userIsBuy
-    ) external onlyOperator whenNotPaused nonReentrant {
+    ) external onlyOperator {
         if (amount == 0) revert ZeroAmount();
         if (!isLiquidator[liquidator]) revert NotLiquidator();
-
-        PerpsTypes.Market storage m = _market(marketId);
-        if (m.paused) revert MarketIsPaused();
 
         PerpsTypes.FundingIndex memory index = _advanceFundingIndex(marketId);
         _settleAccountFunding(user, marketId, index);
@@ -425,15 +446,6 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         emit AdlExecuted(marketId, user, liquidator, userIsBuy ? int256(amount) : -int256(amount), mark);
     }
 
-    function getBalance(address user, uint256 marketId)
-        external
-        view
-        returns (int256 margin, int256 position)
-    {
-        PerpsTypes.Balance memory b = balances[user][marketId];
-        return (b.margin, b.position);
-    }
-
     function isAdlTriggered(uint256 marketId, address liquidator) external view returns (bool) {
         _requireMarket(marketId);
         if (!isLiquidator[liquidator]) return false;
@@ -456,9 +468,7 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
 
         PerpsTypes.Order calldata takerOrder = s.takerOrder;
         uint256 marketId = takerOrder.marketId;
-        PerpsTypes.Market storage m = _market(marketId);
-        if (m.paused) revert MarketIsPaused();
-        
+
         PerpsTypes.FundingIndex memory index = _advanceFundingIndex(marketId);
         _settleAccountFunding(takerOrder.trader, marketId, index);
 
@@ -481,8 +491,10 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
             _consumeFill(makerOrder, s.makerSignatures[i], fill.amount);
             takerFilled += fill.amount;
 
-            uint256 makerMargin = _lockFillMargin(makerOrder, fill.amount);
-            uint256 takerMargin = _lockFillMargin(takerOrder, fill.amount);
+            (uint256 makerMargin, uint256 makerFee) =
+                _lockFillMarginAndFee(makerOrder, fill.amount, fill.priceX18, false);
+            (uint256 takerMargin, uint256 takerFee) =
+                _lockFillMarginAndFee(takerOrder, fill.amount, fill.priceX18, true);
 
             PerpsTypes.Balance memory makerBal = balances[makerOrder.trader][marketId];
             PerpsTypes.Balance memory takerBal = balances[takerOrder.trader][marketId];
@@ -494,11 +506,6 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
             _setBalance(takerOrder.trader, marketId, newTaker);
             _tryReturnMarginToVault(makerOrder.trader, marketId);
             _tryReturnMarginToVault(takerOrder.trader, marketId);
-
-            uint256 notional = (fill.amount * fill.priceX18) / PerpsTypes.BASE;
-            uint256 makerFee = (notional * MAKER_FEE_NUMERATOR) / FEE_DENOMINATOR;
-            uint256 takerFee = (notional * TAKER_FEE_NUMERATOR) / FEE_DENOMINATOR;
-            vault.collectTradeFees(makerOrder.trader, makerFee, takerOrder.trader, takerFee);
 
             emit TradeSettled(
                 marketId,
@@ -582,13 +589,21 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         emit FundingSettled(account, marketId, marginDelta);
     }
 
-    function _lockFillMargin(PerpsTypes.Order calldata order, uint256 fillAmount)
-        private
-        returns (uint256 toLock)
-    {
+    /// @dev Lock fill collateral + trading fee from vault free.
+    ///      Only collateral is credited to Balance.margin; fee goes to protocolFees.
+    function _lockFillMarginAndFee(
+        PerpsTypes.Order calldata order,
+        uint256 fillAmount,
+        uint256 fillPriceX18,
+        bool isTaker
+    ) private returns (uint256 toLock, uint256 fee) {
         toLock = PerpsMath.fillMargin(order.margin, order.amount, fillAmount);
-        if (toLock == 0) return toLock;
-        vault.adjustUserBalance(order.trader, -int256(toLock));
+        uint256 notional = (fillAmount * fillPriceX18) / PerpsTypes.BASE;
+        fee = isTaker
+            ? (notional * TAKER_FEE_NUMERATOR) / FEE_DENOMINATOR
+            : (notional * MAKER_FEE_NUMERATOR) / FEE_DENOMINATOR;
+
+        vault.debitFreeForFill(order.trader, order.marketId, toLock, fee);
         _creditMargin(order.trader, order.marketId, int256(toLock));
     }
 
@@ -597,14 +612,14 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     }
 
     /// @dev If position is flat and margin > 0, return margin to free vault balance.
-    /// @dev Liquidators keep margin parked for subsequent liquidations; they withdraw via `removeMargin`.
+    /// @dev Liquidators keep margin parked for subsequent liquidations.
     function _tryReturnMarginToVault(address user, uint256 marketId) private {
         if (isLiquidator[user]) return;
         PerpsTypes.Balance storage b = balances[user][marketId];
         if (b.position != 0 || b.margin <= 0) return;
         uint256 amount = uint256(b.margin);
         b.margin = 0;
-        vault.adjustUserBalance(user, int256(amount));
+        vault.adjustUserBalance(user, marketId, int256(amount));
     }
 
     function _verifyOrder(PerpsTypes.Order calldata order, bytes calldata signature)

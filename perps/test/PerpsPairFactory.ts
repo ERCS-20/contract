@@ -17,10 +17,11 @@ describe("PerpsPairFactory", async function () {
 
     const exchange = await viem.deployContract("PerpsExchange", []);
     const vault = await viem.deployContract("GlobalPerpsVault", [exchange.address]);
+    await exchange.write.setDAO([deployer.account.address, true]);
     await exchange.write.setVault([vault.address]);
 
-    const twap = await viem.deployContract("Ercs20TwapOracle", [exchange.address, 15n * 60n, 30n]);
-    const funder = await viem.deployContract("Ercs20FundingOracle", [exchange.address, 5n * 60n]);
+    const twap = await viem.deployContract("Ercs20TwapOracle", [exchange.address]);
+    const funder = await viem.deployContract("Ercs20FundingOracle", [exchange.address]);
     await exchange.write.setOracle([twap.address]);
     await exchange.write.setFunder([funder.address]);
 
@@ -98,7 +99,7 @@ describe("PerpsPairFactory", async function () {
     assert.equal(await publicClient.getBalance({ address: pairFactory.address }), 0n);
     assert.equal(await vault.read.balances([liquidator.account.address]), 0n);
 
-    const liqBal = await exchange.read.getBalance([liquidator.account.address, 0n]);
+    const liqBal = await exchange.read.balances([liquidator.account.address, 0n]);
     assert.equal(liqBal[0], DEFAULT_FEE);
     assert.equal(liqBal[1], 0n);
 
@@ -108,6 +109,8 @@ describe("PerpsPairFactory", async function () {
     assert.equal(market[2], false); // paused
     assert.equal(market[3], DEFAULT_ADL); // adlEquityThreshold = fee / 2
     assert.equal(market[4], DEFAULT_MIN_COLLATERAL);
+    const settlement = await exchange.read.marketSettlements([0n]);
+    assert.equal(settlement[0], false); // enabled
     assert.equal(await pairFactory.read.defaultMinCollateralX18(), DEFAULT_MIN_COLLATERAL);
     assert.equal((await exchange.read.oracle()).toLowerCase(), twap.address.toLowerCase());
     assert.equal((await exchange.read.funder()).toLowerCase(), funder.address.toLowerCase());
@@ -130,10 +133,11 @@ describe("PerpsPairFactory", async function () {
   it("reverts when insurance account unset", async function () {
     const { viem } = await network.connect();
     const publicClient = await viem.getPublicClient();
-    const [, , tokenOwner, , liquidator] = await viem.getWalletClients();
+    const [deployer, , tokenOwner, , liquidator] = await viem.getWalletClients();
 
     const exchange = await viem.deployContract("PerpsExchange", []);
     const vault = await viem.deployContract("GlobalPerpsVault", [exchange.address]);
+    await exchange.write.setDAO([deployer.account.address, true]);
     await exchange.write.setVault([vault.address]);
     const mockErcs20Factory = await viem.deployContract("MockERCS20Factory", []);
     const pairFactory = await viem.deployContract("PerpsPairFactory", [
@@ -189,6 +193,7 @@ describe("PerpsPairFactory", async function () {
     assert.equal(market[1], true); // exists
     assert.equal(market[3], customAdl); // adlEquityThreshold
     assert.equal(market[4], customMin); // minCollateralX18
+    assert.equal((await exchange.read.marketSettlements([0n]))[0], false);
   });
 
   it("reverts on duplicate market", async function () {

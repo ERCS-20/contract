@@ -15,11 +15,7 @@ describe("Ercs20TwapOracle", async function () {
     const spot = await viem.deployContract("MockErcs20Reserves", []);
     await spot.write.setReserves([1n * COL, 100n * COL]); // mid = 100
 
-    const oracle = await viem.deployContract("Ercs20TwapOracle", [
-      exchange.account.address,
-      15n * 60n,
-      30n,
-    ]);
+    const oracle = await viem.deployContract("Ercs20TwapOracle", [exchange.account.address]);
 
     const oracleAsExchange = await viem.getContractAt("Ercs20TwapOracle", oracle.address, {
       client: { public: publicClient, wallet: exchange },

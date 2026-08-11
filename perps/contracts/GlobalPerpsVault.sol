@@ -8,8 +8,8 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 
 /// @title GlobalPerpsVault
 /// @notice Shared Perps custody for ARC native USDC (not an ERC20 / not WUSDC).
-/// @dev One free-collateral balance per user (cross-wallet UX). Positions live per marketId on the
-///      exchange; open/close PnL credits/debits this shared balance.
+/// @dev One free-collateral balance per user. Per-market `marketPots` track funds locked into each
+///      pair; `adjustUserBalance` moves free ↔ pot, and unlocks cannot exceed the pot.
 contract GlobalPerpsVault is Ownable, Pausable, ReentrancyGuard {
     using ECDSA for bytes32;
 
@@ -27,6 +27,8 @@ contract GlobalPerpsVault is Ownable, Pausable, ReentrancyGuard {
 
     /// @notice Shared free collateral per user (all markets).
     mapping(address => uint256) public balances;
+    /// @notice Native USDC locked into each market (from user free via adjust).
+    mapping(uint256 => uint256) public marketPots;
     mapping(address => mapping(uint256 => bool)) public usedWithdrawOrder;
     mapping(address => uint256) public forcedWithdrawalRequestedAt;
     /// @notice Accumulated protocol trading fees (native USDC).
@@ -45,7 +47,10 @@ contract GlobalPerpsVault is Ownable, Pausable, ReentrancyGuard {
     event Withdrawn(address indexed user, uint256 amount, uint256 orderId);
     event ForcedWithdrawalRequested(address indexed user);
     event ForcedWithdrawalExecuted(address indexed user, uint256 amount);
-    event UserBalanceAdjusted(address indexed user, int256 delta);
+    event UserBalanceAdjusted(address indexed user, uint256 indexed marketId, int256 delta);
+    event FreeDebitedForFill(
+        address indexed user, uint256 indexed marketId, uint256 collateral, uint256 fee
+    );
     event FeesClaimed(address indexed to, uint256 amount);
 
     error NotExchange();
@@ -54,6 +59,7 @@ contract GlobalPerpsVault is Ownable, Pausable, ReentrancyGuard {
     error NotClaimFeeDAO();
     error InvalidAddress();
     error InsufficientBalance();
+    error InsufficientMarketPot();
     error WithdrawOrderAlreadyUsed();
     error ForcedWithdrawalTooEarly();
     error NoPendingExchangeUpdate();
@@ -150,7 +156,7 @@ contract GlobalPerpsVault is Ownable, Pausable, ReentrancyGuard {
     }
 
     /// @notice Deposit ARC native USDC into `to`'s shared free collateral. Exchange only.
-    function depositFor(address to) external payable onlyExchange whenNotPaused {
+    function depositFor(address to) external payable onlyExchange {
         if (to == address(0)) revert InvalidAddress();
         uint256 amount = msg.value;
         if (amount == 0) revert ZeroAmount();
@@ -194,29 +200,37 @@ contract GlobalPerpsVault is Ownable, Pausable, ReentrancyGuard {
         emit ForcedWithdrawalExecuted(msg.sender, amount);
     }
 
-    /// @notice Adjust user shared free balance by signed delta.
-    function adjustUserBalance(address user, int256 delta) external onlyExchange {
-        if (delta > 0) {
-            balances[user] += uint256(delta);
-        } else {
+    /// @notice Move free collateral ↔ per-market pot.
+    /// @dev `delta < 0`: user free → `marketPots[marketId]`. `delta > 0`: pot → user free (pot cannot go negative).
+    function adjustUserBalance(address user, uint256 marketId, int256 delta) external onlyExchange {
+        if (delta < 0) {
             uint256 amt = uint256(-delta);
             if (balances[user] < amt) revert InsufficientBalance();
             balances[user] -= amt;
+            marketPots[marketId] += amt;
+        } else if (delta > 0) {
+            uint256 amt = uint256(delta);
+            if (marketPots[marketId] < amt) revert InsufficientMarketPot();
+            marketPots[marketId] -= amt;
+            balances[user] += amt;
+        } else {
+            return;
         }
-        emit UserBalanceAdjusted(user, delta);
+        emit UserBalanceAdjusted(user, marketId, delta);
     }
 
-    /// @notice Debit maker/taker free balances into the protocol fee pool in one call.
-    function collectTradeFees(address maker, uint256 makerFee, address taker, uint256 takerFee)
+    /// @notice Debit free collateral for a fill: `collateral` → pot, `fee` → `protocolFees`.
+    function debitFreeForFill(address user, uint256 marketId, uint256 collateral, uint256 fee)
         external
         onlyExchange
     {
-        if (balances[maker] < makerFee) revert InsufficientBalance();
-        balances[maker] -= makerFee;
-        if (balances[taker] < takerFee) revert InsufficientBalance();
-        balances[taker] -= takerFee;
-
-        protocolFees += (makerFee + takerFee);
+        uint256 total = collateral + fee;
+        if (total == 0) return;
+        if (balances[user] < total) revert InsufficientBalance();
+        balances[user] -= total;
+        marketPots[marketId] += collateral;
+        protocolFees += fee;
+        emit FreeDebitedForFill(user, marketId, collateral, fee);
     }
 
     /// @notice Claim accumulated protocol fees to `claimFeeDAO`.

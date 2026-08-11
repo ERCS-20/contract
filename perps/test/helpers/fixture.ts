@@ -11,7 +11,7 @@ export const MIN_COLLATERAL = 11n * 10n ** 17n;
 export async function deployPerpsSystem() {
   const { viem, networkHelpers } = await network.connect();
   const publicClient = await viem.getPublicClient();
-  const [deployer, withdrawDao, pauseDao, claimFeeDao, operator, maker, taker, liquidator] =
+  const [deployer, withdrawDao, daoWallet, claimFeeDao, operator, maker, taker, liquidator] =
     await viem.getWalletClients();
 
   const oracle = await viem.deployContract("MockOracle", []);
@@ -20,16 +20,20 @@ export async function deployPerpsSystem() {
   const exchange = await viem.deployContract("PerpsExchange", []);
   const vault = await viem.deployContract("GlobalPerpsVault", [exchange.address]);
 
-  await exchange.write.setVault([vault.address]);
-  await exchange.write.setPauseDAO([pauseDao.account.address]);
+  await exchange.write.setDAO([daoWallet.account.address, true]);
+  const exchangeAsDao = await viem.getContractAt("PerpsExchange", exchange.address, {
+    client: { public: publicClient, wallet: daoWallet },
+  });
+
+  await exchangeAsDao.write.setVault([vault.address]);
   await vault.write.setWithdrawDAO([withdrawDao.account.address]);
-  await vault.write.setPauseDAO([pauseDao.account.address]);
+  await vault.write.setPauseDAO([daoWallet.account.address]);
   await vault.write.setClaimFeeDAO([claimFeeDao.account.address]);
-  await exchange.write.setOperator([operator.account.address, true]);
-  await exchange.write.setLiquidator([liquidator.account.address, true]);
+  await exchangeAsDao.write.setOperator([operator.account.address, true]);
+  await exchangeAsDao.write.setLiquidator([liquidator.account.address, true]);
   await exchange.write.setFactory([deployer.account.address]);
-  await exchange.write.setOracle([oracle.address]);
-  await exchange.write.setFunder([funder.address]);
+  await exchangeAsDao.write.setOracle([oracle.address]);
+  await exchangeAsDao.write.setFunder([funder.address]);
 
   await oracle.write.setPrice([MARKET_ID, PRICE]);
   // Placeholder ERCS20; mock oracles do not read reserves from it.
@@ -49,7 +53,8 @@ export async function deployPerpsSystem() {
     chainId,
     deployer,
     withdrawDao,
-    pauseDao,
+    pauseDao: daoWallet,
+    dao: daoWallet,
     claimFeeDao,
     operator,
     maker,
@@ -66,11 +71,9 @@ export async function deployPerpsSystem() {
   };
 }
 
-export async function fundAndDeposit(
-  ctx: Awaited<ReturnType<typeof deployPerpsSystem>>,
-  wallet: { account: { address: `0x${string}` } },
-  amount: bigint,
-) {
+type PerpsCtx = Awaited<ReturnType<typeof deployPerpsSystem>>;
+
+export async function fundAndDeposit(ctx: PerpsCtx, wallet: PerpsCtx["maker"], amount: bigint) {
   const { viem, publicClient, vault } = ctx;
   const vaultAsUser = await viem.getContractAt("GlobalPerpsVault", vault.address, {
     client: { public: publicClient, wallet },
@@ -79,11 +82,7 @@ export async function fundAndDeposit(
 }
 
 /** Deposit then lock `amount` into market Balance.margin for `wallet`. */
-export async function fundDepositAndAddMargin(
-  ctx: Awaited<ReturnType<typeof deployPerpsSystem>>,
-  wallet: { account: { address: `0x${string}` } },
-  amount: bigint,
-) {
+export async function fundDepositAndAddMargin(ctx: PerpsCtx, wallet: PerpsCtx["maker"], amount: bigint) {
   const { viem, publicClient, exchange, MARKET_ID } = ctx;
   await fundAndDeposit(ctx, wallet, amount);
   const exchangeAsUser = await viem.getContractAt("PerpsExchange", exchange.address, {

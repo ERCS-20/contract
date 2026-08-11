@@ -18,6 +18,7 @@ contract Ercs20FundingOracle is Ownable, IFundingOracle {
     uint256 public constant EIGHT_HOURS = 8 hours;
     /// @notice Max absolute funding over an 8-hour window: 0.75%.
     uint256 public constant MAX_ABS_RATE_8H_X18 = (BASE * 75) / 10_000;
+    uint256 public constant MIN_SAMPLE_INTERVAL = 5 minutes;
 
     struct MarketState {
         bool isPositive;
@@ -49,10 +50,10 @@ contract Ercs20FundingOracle is Ownable, IFundingOracle {
         _;
     }
 
-    constructor(address exchange_, uint256 minSampleInterval_) Ownable(msg.sender) {
+    constructor(address exchange_) Ownable(msg.sender) {
         if (exchange_ == address(0)) revert ZeroAddress();
         exchange = exchange_;
-        minSampleInterval = minSampleInterval_ == 0 ? 5 minutes : minSampleInterval_;
+        minSampleInterval = MIN_SAMPLE_INTERVAL;
     }
 
     /// @inheritdoc IFundingOracle

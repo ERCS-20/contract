@@ -29,6 +29,16 @@ library PerpsTypes {
         uint256 lastPriceX18;
     }
 
+    /// @notice Per-market final settlement state (separate from hot `Market` reads).
+    struct MarketSettlement {
+        /// @notice Irreversible: market closed; users self-settle at `settlementPriceX18`.
+        bool enabled;
+        /// @notice Frozen close-out price once enabled (chosen off-chain).
+        uint256 settlementPriceX18;
+        /// @notice Timestamp when final settlement was first enabled (lock start).
+        uint256 lockedAt;
+    }
+
     /// @notice EIP-712 limit order. `margin` is total collateral to lock for the full `amount`.
     struct Order {
         address trader;

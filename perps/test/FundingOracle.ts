@@ -17,10 +17,7 @@ describe("Ercs20FundingOracle", async function () {
     const spot = await viem.deployContract("MockErcs20Reserves", []);
     await spot.write.setReserves([1n * COL, 100n * COL]);
 
-    const funder = await viem.deployContract("Ercs20FundingOracle", [
-      exchange.account.address,
-      5n * 60n,
-    ]);
+    const funder = await viem.deployContract("Ercs20FundingOracle", [exchange.account.address]);
 
     const funderAsExchange = await viem.getContractAt("Ercs20FundingOracle", funder.address, {
       client: { public: publicClient, wallet: exchange },
