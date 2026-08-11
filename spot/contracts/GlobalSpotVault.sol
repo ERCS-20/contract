@@ -28,43 +28,32 @@ contract GlobalSpotVault is Ownable, Pausable, ReentrancyGuard {
     /// @notice Address of the SpotExchange contract allowed to call `internalTransfer`.
     /// @dev May be replaced via `proposeExchangeUpdate` + `applyExchangeUpdate` (7-day delay).
     address public exchange;
-
     /// @notice Pending exchange rotation: proposed address and earliest `applyExchangeUpdate` time.
     struct PendingExchangeUpdate {
         address pendingExchange;
         uint256 exchangeActionTimestamp;
     }
-
     /// @notice Active pending exchange proposal, if any (`pendingExchange` non-zero).
     PendingExchangeUpdate public pendingExchangeUpdate;
-
     /// @notice Address of the wrapped USDC token implementing WETH-style deposit/withdraw.
     address public immutable wusdc;
-
     /// @notice Address whose EIP-712 signatures authorize withdrawals.
     address public withdrawDAO;
-
     /// @notice Address allowed to call and receive payout from `claimFees`.
     address public claimFeeDAO;
-
     /// @notice Address that governs the token whitelist.
     address public tokenWhitelistDAO;
-
     /// @notice Address allowed to pause/unpause vault operations.
     address public pauseDAO;
 
     /// @notice Mapping of token => whether it is allowed to be deposited.
     mapping(address => bool) public isAllowedToken;
-
     /// @notice Per-user-per-token balances held by the vault.
     mapping(address => mapping(address => uint256)) public balances;
-
     /// @notice Accumulated protocol fees per token.
     mapping(address => uint256) public tokenFees;
-
     /// @notice Tracks used withdrawal orderIds per user to prevent replay.
     mapping(address => mapping(uint256 => bool)) public usedWithdrawOrder;
-
     /// @notice Pending forced-withdrawal timestamp per user per token.
     /// 0 means no active forced-withdrawal request.
     mapping(address => mapping(address => uint256)) public forcedWithdrawalRequestedAt;

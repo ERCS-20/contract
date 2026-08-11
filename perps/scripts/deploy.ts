@@ -9,14 +9,15 @@ import { network } from "hardhat";
 async function main() {
   const { viem } = await network.getOrCreate();
   const publicClient = await viem.getPublicClient();
-  const [deployer, daoWallet] = await viem.getWalletClients();
+  const [deployer] = await viem.getWalletClients();
 
   const ercs20Factory = "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512";
   const orbix = "0xCafac3dD18aC6c6e92c921884f9E4176737C052c";
 
-  const withdrawDao = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC";
-  const operator = "0x90F79bf6EB2c4f870365E785982E1f101E93b906";
-  const liquidator = "0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65";
+  const dao = deployer.account.address;
+  const withdrawDao = "0xa0Ee7A142d267C1f36714E4a8F75612F20a79720";
+  const operator = "0x23618e81E3f5cdF7f54C3d65f7FBc0aBf5B21E8f";
+  const liquidator = "0x14dC79964da2C08b23698B3D3cc7Ca32193d9955";
 
   const exchange = await viem.deployContract("PerpsExchange", []);
   console.log("PerpsExchange:", exchange.address);
@@ -24,9 +25,9 @@ async function main() {
   const vault = await viem.deployContract("GlobalPerpsVault", [exchange.address]);
   console.log("GlobalPerpsVault:", vault.address);
 
-  await exchange.write.setDAO([daoWallet.account.address, true]);
+  await exchange.write.setDAO([dao, true]);
   const exchangeAsDao = await viem.getContractAt("PerpsExchange", exchange.address, {
-    client: { public: publicClient, wallet: daoWallet },
+    client: { public: publicClient, wallet: deployer },
   });
 
   await exchangeAsDao.write.setVault([vault.address]);
@@ -53,10 +54,9 @@ async function main() {
   await exchangeAsDao.write.setLiquidator([liquidator, true]);
 
   await vault.write.setWithdrawDAO([withdrawDao]);
-  await vault.write.setPauseDAO([daoWallet.account.address]);
-  await vault.write.setClaimFeeDAO([daoWallet.account.address]);
+  // await vault.write.setPauseDAO([]);
+  // await vault.write.setClaimFeeDAO([]);
 
-  await pairFactory.write.setPairDAO([daoWallet.account.address]);
   await pairFactory.write.setInsuranceAccount([liquidator]);
   console.log("Roles wired (DAO / operator / liquidator / insurance)");
 
@@ -64,6 +64,17 @@ async function main() {
   await pairFactory.write.create([orbix], { value: fee });
   console.log("PerpsPairFactory.create(orbix) applied, fee:", fee.toString());
   console.log("Deployer:", deployer.account.address);
+
+  // PerpsExchange: 0xa51c1fc2f0d1a1b8494ed1fe312d7c3a78ed91c0
+  // GlobalPerpsVault: 0x0dcd1bf9a1b36ce34237eeafef220932846bcd82
+  // PerpsExchange.setVault applied
+  // Ercs20TwapOracle: 0x959922be3caee4b8cd9a407cc3ac1c251c2007b1
+  // Ercs20FundingOracle: 0x9a9f2ccfde556a7e9ff0848998aa4a0cfd8863ae
+  // PerpsExchange oracle/funder set
+  // PerpsPairFactory: 0xc6e7df5e7b4f2a278906862b61205850344d4e7d
+  // Roles wired (DAO / operator / liquidator / insurance)
+  // PerpsPairFactory.create(orbix) applied, fee: 1000000000000000000000
+  // Deployer: 0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266
 }
 
 main().catch((err) => {

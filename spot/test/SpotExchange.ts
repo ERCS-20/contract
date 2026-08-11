@@ -117,7 +117,7 @@ describe("SpotExchange", async function () {
     assert.equal(await vault.read.tokenFees([tokenB.address]), takerFee);
   });
 
-  it("reverts settleTradesBatch when caller is not an allowed key", async function () {
+  it("reverts settleTradesBatch when caller is not an operator", async function () {
     const ctx = await deploySpotSystem();
     const { viem, publicClient, chainId, maker, taker, tokenA, tokenB, exchange } = ctx;
 
@@ -161,7 +161,7 @@ describe("SpotExchange", async function () {
         ]),
       ]),
       exchange,
-      "NotAllowedKey",
+      "NotOperator",
     );
   });
 

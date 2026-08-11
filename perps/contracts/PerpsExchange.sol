@@ -22,14 +22,7 @@ import {GlobalPerpsVault} from "./GlobalPerpsVault.sol";
 contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     using ECDSA for bytes32;
 
-    GlobalPerpsVault public vault;
-    address public factory;
-    /// @notice Shared mark oracle for all markets (e.g. Ercs20TwapOracle).
-    address public oracle;
-    /// @notice Shared funding oracle for all markets; address(0) disables funding.
-    address public funder;
-
-    /// @notice Binance USDT-M VIP0-style fees on notional: maker 0.02%, taker 0.05%.
+    /// @notice Fees on notional: maker 0.02%, taker 0.05%.
     uint256 public constant FEE_DENOMINATOR = 10_000;
     uint256 public constant MAKER_FEE_NUMERATOR = 2;
     uint256 public constant TAKER_FEE_NUMERATOR = 5;
@@ -39,6 +32,13 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     bytes32 public constant ORDER_TYPEHASH = keccak256(
         "Order(address trader,uint256 marketId,uint256 amount,uint256 margin,uint256 priceX18,bool isBuy,uint256 nonce,uint256 expiry)"
     );
+
+    GlobalPerpsVault public vault;
+    address public factory;
+    /// @notice Shared mark oracle for all markets (e.g. Ercs20TwapOracle).
+    address public oracle;
+    /// @notice Shared funding oracle for all markets; address(0) disables funding.
+    address public funder;
 
     /// @notice Protocol DAOs authorized for admin configuration (vault, oracles, pause, etc.).
     mapping(address => bool) public dao;
@@ -63,7 +63,6 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     event OperatorSet(address indexed account, bool allowed);
     event LiquidatorSet(address indexed account, bool allowed);
     event SignerSet(address indexed trader, address indexed signer, bool allowed);
-    event InsuranceSeeded(uint256 indexed marketId, address indexed account, uint256 amount);
     event MarketCreated(
         uint256 indexed marketId, address indexed ercs20, uint256 adlEquityThreshold, uint256 minCollateralX18
     );
@@ -131,7 +130,6 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     error CannotLiquidateNegativeAccount();
     error NotLiquidator();
     error LiquidatorCannotTake();
-    error FunderNotSet();
     error NoLastPrice();
 
     modifier onlyOperator() {
@@ -286,7 +284,6 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         _creditMargin(account, marketId, int256(amount));
 
         emit MarginAdded(account, marketId, amount);
-        emit InsuranceSeeded(marketId, account, amount);
     }
 
     function setMinCollateral(uint256 marketId, uint256 minCollateralX18) external onlyDAO {

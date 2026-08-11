@@ -25,10 +25,8 @@ contract SpotExchange is Ownable {
 
     /// @notice EIP-712 domain separator.
     bytes32 public immutable DOMAIN_SEPARATOR;
-
     /// @notice Typehash for the SpotOrder struct.
     bytes32 public constant SPOT_ORDER_TYPEHASH = keccak256("SpotOrder(address maker,address makerToken,address takerToken,uint256 makerAmount,uint256 takerAmount,uint256 expiry,uint256 salt,uint8 timeInForce)");
-
     /// @notice Fee rate constants: 0.2% = 20 / 10000.
     uint256 public constant FEE_NUMERATOR = 20;
     uint256 public constant FEE_DENOMINATOR = 10000;
@@ -36,18 +34,11 @@ contract SpotExchange is Ownable {
     /// @notice GlobalSpotVault used for balance movements.
     /// @dev Set once by owner after deployment to avoid constructor circular dependency.
     IGlobalSpotVault public vault;
-
-    /// @notice Addresses allowed to call `settleTrades`.
-    mapping(address => bool) public allowedKeys;
-
+    /// @notice Addresses allowed to call `settleTradesBatch`.
+    mapping(address => bool) public isOperator;
     /// @notice Tracks cumulative filled makerAmount per order hash.
     mapping(bytes32 => uint256) public filledAmount;
-
-    /// @notice Emitted when an address is added to allowedKeys.
-    event DAOAdded(address indexed addr);
-
-    /// @notice Emitted when an address is removed from allowedKeys.
-    event DAORemoved(address indexed addr);
+    event OperatorSet(address indexed account, bool allowed);
 
     /// @notice Emitted for each maker-taker fill in `settleTrades`.
     event TradeExecuted(
@@ -66,7 +57,7 @@ contract SpotExchange is Ownable {
     /// @notice Emitted when the vault is set.  
     event VaultSet(address indexed vault);
 
-    error NotAllowedKey();
+    error NotOperator();
     error OrderExpired();
     error MakerPriceInvalid();
     error TakerPriceInvalid();
@@ -101,8 +92,8 @@ contract SpotExchange is Ownable {
         Fulfillment[] fulfillments;
     }
 
-    modifier onlyAllowedKey() {
-        if (!allowedKeys[msg.sender]) revert NotAllowedKey();
+    modifier onlyOperator() {
+        if (!isOperator[msg.sender]) revert NotOperator();
         _;
     }
 
@@ -129,19 +120,13 @@ contract SpotExchange is Ownable {
         emit VaultSet(vault_);
     }
 
-    /// @notice Adds an address to the set of allowedKeys.
-    function addDAO(address addr) external onlyOwner {
-        allowedKeys[addr] = true;
-        emit DAOAdded(addr);
+    /// @notice Grant or revoke operator rights to call `settleTradesBatch`.
+    function setOperator(address account, bool allowed) external onlyOwner {
+        isOperator[account] = allowed;
+        emit OperatorSet(account, allowed);
     }
 
-    /// @notice Removes an address from the set of allowedKeys.
-    function removeDAO(address addr) external onlyOwner {
-        allowedKeys[addr] = false;
-        emit DAORemoved(addr);
-    }
-
-    function settleTradesBatch(TradeSettlement[] calldata settlements) external onlyAllowedKey {
+    function settleTradesBatch(TradeSettlement[] calldata settlements) external onlyOperator {
         uint256 length = settlements.length;
         for (uint256 i; i < length; ) {
             _settleTrades(settlements[i].takerOrder, settlements[i].takerSignature, settlements[i].makerOrders, settlements[i].makerSignatures, settlements[i].fulfillments);

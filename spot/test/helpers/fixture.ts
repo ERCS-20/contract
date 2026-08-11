@@ -42,7 +42,7 @@ export async function deploySpotSystem() {
   await vaultAsWhitelist.write.addAllowedToken([tokenB.address]);
   await vaultAsWhitelist.write.addAllowedToken([wusdc.address]);
 
-  await exchange.write.addDAO([relayer.account.address]);
+  await exchange.write.setOperator([relayer.account.address, true]);
 
   const chainId = await publicClient.getChainId();
 

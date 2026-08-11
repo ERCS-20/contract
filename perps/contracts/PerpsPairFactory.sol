@@ -26,7 +26,6 @@ interface IPerpsExchange {
 /// @notice Creates perps markets for ERCS20 underlyings.
 /// @dev
 /// - Public `create(baseToken)` for ERCS20 token owners (verified via ERCS20Factory).
-/// - pairDAO-only `create(baseToken, adlEquityThreshold, minCollateralX18)` with custom params.
 /// - Default ADL threshold is `fee / 2` (half of listing-fee insurance seed).
 /// - Listing `fee` is forwarded to PerpsExchange.seedInsuranceMargin for `insuranceAccount`.
 /// - ERCS20 is stored on PerpsExchange.Market (oracles receive it per call; no oracle rebinding on upgrade).
@@ -34,7 +33,6 @@ contract PerpsPairFactory is Ownable {
     IERCS20Factory public immutable ercs20Factory;
     IPerpsExchange public immutable exchange;
 
-    address public pairDAO;
     /// @notice Cold liquidator account that receives listing-fee insurance margin.
     address public insuranceAccount;
     /// @notice Number of markets created; next id is the current value (ids start at 0).
@@ -61,8 +59,6 @@ contract PerpsPairFactory is Ownable {
     event PerpsMarketCreated(
         address indexed ercs20, uint256 indexed marketId, uint256 adlEquityThreshold, uint256 minCollateralX18
     );
-    event PairDAOSet(address indexed pairDAO);
-    event PairDAORemoved(address indexed pairDAO);
     event InsuranceAccountSet(address indexed insuranceAccount);
     event DefaultMinCollateralSet(uint256 minCollateralX18);
     event FeeSet(uint256 fee);
@@ -72,20 +68,13 @@ contract PerpsPairFactory is Ownable {
 
     error NotERCS20();
     error NotTokenOwner();
-    error NotPairDAO();
     error MarketAlreadyExists();
     error InvalidAddress();
-    error InvalidOpeningPrice();
     error OpeningPriceDecimalsTooHigh();
     error OpeningPriceTooHigh();
     error InvalidMinCollateral();
     error IncorrectFee();
     error InsuranceAccountNotSet();
-
-    modifier onlyPairDAO() {
-        if (msg.sender != pairDAO) revert NotPairDAO();
-        _;
-    }
 
     constructor(address ercs20Factory_, address exchange_) Ownable(msg.sender) {
         if (ercs20Factory_ == address(0) || exchange_ == address(0)) revert InvalidAddress();
@@ -94,18 +83,6 @@ contract PerpsPairFactory is Ownable {
         exchange = IPerpsExchange(exchange_);
         defaultMinCollateralX18 = DEFAULT_MIN_COLLATERAL_X18;
         fee = DEFAULT_FEE;
-    }
-
-    function setPairDAO(address pairDAO_) external onlyOwner {
-        if (pairDAO_ == address(0)) revert InvalidAddress();
-        pairDAO = pairDAO_;
-        emit PairDAOSet(pairDAO_);
-    }
-
-    function removePairDAO(address) external onlyOwner {
-        address previous = pairDAO;
-        pairDAO = address(0);
-        emit PairDAORemoved(previous);
     }
 
     function setInsuranceAccount(address insuranceAccount_) external onlyOwner {
@@ -135,18 +112,6 @@ contract PerpsPairFactory is Ownable {
         if (IERCS20(baseToken).owner() != msg.sender) revert NotTokenOwner();
         _validateErcs20OpeningPrice(baseToken);
         _createMarket(baseToken, fee / 2, defaultMinCollateralX18);
-    }
-
-    /// @notice Creates a perps market with custom risk params. DAO only.
-    function create(address baseToken, uint256 adlEquityThreshold, uint256 minCollateralX18)
-        external
-        payable
-        onlyPairDAO
-    {
-        if (msg.value != fee) revert IncorrectFee();
-        if (baseToken == address(0)) revert InvalidAddress();
-        if (minCollateralX18 < PerpsTypes.BASE) revert InvalidMinCollateral();
-        _createMarket(baseToken, adlEquityThreshold, minCollateralX18);
     }
 
     function _createMarket(address baseToken, uint256 adlEquityThreshold, uint256 minCollateralX18) internal {

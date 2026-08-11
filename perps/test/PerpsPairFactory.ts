@@ -13,7 +13,7 @@ describe("PerpsPairFactory", async function () {
   async function deploy() {
     const { viem, networkHelpers } = await network.connect();
     const publicClient = await viem.getPublicClient();
-    const [deployer, pairDao, tokenOwner, other, liquidator] = await viem.getWalletClients();
+    const [deployer, tokenOwner, other, liquidator] = await viem.getWalletClients();
 
     const exchange = await viem.deployContract("PerpsExchange", []);
     const vault = await viem.deployContract("GlobalPerpsVault", [exchange.address]);
@@ -33,7 +33,6 @@ describe("PerpsPairFactory", async function () {
 
     await exchange.write.setFactory([pairFactory.address]);
     await exchange.write.setLiquidator([liquidator.account.address, true]);
-    await pairFactory.write.setPairDAO([pairDao.account.address]);
     await pairFactory.write.setInsuranceAccount([liquidator.account.address]);
 
     return {
@@ -41,7 +40,6 @@ describe("PerpsPairFactory", async function () {
       networkHelpers,
       publicClient,
       deployer,
-      pairDao,
       tokenOwner,
       other,
       liquidator,
@@ -133,7 +131,7 @@ describe("PerpsPairFactory", async function () {
   it("reverts when insurance account unset", async function () {
     const { viem } = await network.connect();
     const publicClient = await viem.getPublicClient();
-    const [deployer, , tokenOwner, , liquidator] = await viem.getWalletClients();
+    const [deployer, tokenOwner, , liquidator] = await viem.getWalletClients();
 
     const exchange = await viem.deployContract("PerpsExchange", []);
     const vault = await viem.deployContract("GlobalPerpsVault", [exchange.address]);
@@ -174,26 +172,6 @@ describe("PerpsPairFactory", async function () {
       pairFactory,
       "NotTokenOwner",
     );
-  });
-
-  it("pairDAO can create with custom params", async function () {
-    const { viem, publicClient, pairDao, exchange, mockErcs20Factory, pairFactory, tokenOwner } =
-      await deploy();
-    const token = await registerToken(viem, mockErcs20Factory, tokenOwner);
-
-    const customAdl = 100n * COL;
-    const customMin = 12n * 10n ** 17n;
-    const factoryAsDao = await viem.getContractAt("PerpsPairFactory", pairFactory.address, {
-      client: { public: publicClient, wallet: pairDao },
-    });
-    await factoryAsDao.write.create([token.address, customAdl, customMin], { value: DEFAULT_FEE });
-
-    const market = await exchange.read.markets([0n]);
-    assert.equal(market[0].toLowerCase(), token.address.toLowerCase());
-    assert.equal(market[1], true); // exists
-    assert.equal(market[3], customAdl); // adlEquityThreshold
-    assert.equal(market[4], customMin); // minCollateralX18
-    assert.equal((await exchange.read.marketSettlements([0n]))[0], false);
   });
 
   it("reverts on duplicate market", async function () {
