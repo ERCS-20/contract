@@ -8,6 +8,7 @@ const COL = 10n ** 18n;
 const DEFAULT_MIN_COLLATERAL = COL + 5n * 10n ** 15n + 5n * 10n ** 14n;
 const DEFAULT_FEE = 1000n * 10n ** 18n;
 const DEFAULT_ADL = DEFAULT_FEE / 2n;
+const OPENING_TIME = 1_700_000_000n;
 
 describe("PerpsPairFactory", async function () {
   async function deploy() {
@@ -89,7 +90,7 @@ describe("PerpsPairFactory", async function () {
     const factoryAsOwner = await viem.getContractAt("PerpsPairFactory", pairFactory.address, {
       client: { public: publicClient, wallet: tokenOwner },
     });
-    await factoryAsOwner.write.create([token.address], { value: DEFAULT_FEE });
+    await factoryAsOwner.write.create([token.address, OPENING_TIME], { value: DEFAULT_FEE });
 
     assert.equal(await pairFactory.read.marketCount(), 1n);
     assert.equal(await pairFactory.read.marketIdOf([token.address]), 0n);
@@ -122,7 +123,7 @@ describe("PerpsPairFactory", async function () {
       client: { public: publicClient, wallet: tokenOwner },
     });
     await viem.assertions.revertWithCustomError(
-      factoryAsOwner.write.create([token.address], { value: 0n }),
+      factoryAsOwner.write.create([token.address, OPENING_TIME], { value: 0n }),
       pairFactory,
       "IncorrectFee",
     );
@@ -154,7 +155,7 @@ describe("PerpsPairFactory", async function () {
       client: { public: publicClient, wallet: tokenOwner },
     });
     await viem.assertions.revertWithCustomError(
-      factoryAsOwner.write.create([token.address], { value: DEFAULT_FEE }),
+      factoryAsOwner.write.create([token.address, OPENING_TIME], { value: DEFAULT_FEE }),
       pairFactory,
       "InsuranceAccountNotSet",
     );
@@ -168,7 +169,7 @@ describe("PerpsPairFactory", async function () {
       client: { public: publicClient, wallet: other },
     });
     await viem.assertions.revertWithCustomError(
-      factoryAsOther.write.create([token.address], { value: DEFAULT_FEE }),
+      factoryAsOther.write.create([token.address, OPENING_TIME], { value: DEFAULT_FEE }),
       pairFactory,
       "NotTokenOwner",
     );
@@ -181,9 +182,9 @@ describe("PerpsPairFactory", async function () {
     const factoryAsOwner = await viem.getContractAt("PerpsPairFactory", pairFactory.address, {
       client: { public: publicClient, wallet: tokenOwner },
     });
-    await factoryAsOwner.write.create([token.address], { value: DEFAULT_FEE });
+    await factoryAsOwner.write.create([token.address, OPENING_TIME], { value: DEFAULT_FEE });
     await viem.assertions.revertWithCustomError(
-      factoryAsOwner.write.create([token.address], { value: DEFAULT_FEE }),
+      factoryAsOwner.write.create([token.address, OPENING_TIME], { value: DEFAULT_FEE }),
       pairFactory,
       "MarketAlreadyExists",
     );

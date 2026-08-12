@@ -57,7 +57,11 @@ contract PerpsPairFactory is Ownable {
     uint256 public constant DEFAULT_FEE = 1000e18;
 
     event PerpsMarketCreated(
-        address indexed ercs20, uint256 indexed marketId, uint256 adlEquityThreshold, uint256 minCollateralX18
+        address indexed ercs20,
+        uint256 indexed marketId,
+        uint256 adlEquityThreshold,
+        uint256 minCollateralX18,
+        uint256 openingTime
     );
     event InsuranceAccountSet(address indexed insuranceAccount);
     event DefaultMinCollateralSet(uint256 minCollateralX18);
@@ -72,6 +76,7 @@ contract PerpsPairFactory is Ownable {
     error InvalidAddress();
     error OpeningPriceDecimalsTooHigh();
     error OpeningPriceTooHigh();
+    error InvalidOpeningTime();
     error InvalidMinCollateral();
     error IncorrectFee();
     error InsuranceAccountNotSet();
@@ -104,17 +109,24 @@ contract PerpsPairFactory is Ownable {
     }
 
     /// @notice Creates a perps market for an ERCS20 owned by the caller.
+    /// @param openingTime Unix timestamp when the market opens (from the listing page).
     /// @dev ADL threshold defaults to `fee / 2`.
-    function create(address baseToken) external payable {
+    function create(address baseToken, uint256 openingTime) external payable {
         if (msg.value != fee) revert IncorrectFee();
         if (baseToken == address(0)) revert InvalidAddress();
+        if (openingTime == 0) revert InvalidOpeningTime();
         if (!ercs20Factory.ercs20s(baseToken)) revert NotERCS20();
         if (IERCS20(baseToken).owner() != msg.sender) revert NotTokenOwner();
         _validateErcs20OpeningPrice(baseToken);
-        _createMarket(baseToken, fee / 2, defaultMinCollateralX18);
+        _createMarket(baseToken, fee / 2, defaultMinCollateralX18, openingTime);
     }
 
-    function _createMarket(address baseToken, uint256 adlEquityThreshold, uint256 minCollateralX18) internal {
+    function _createMarket(
+        address baseToken,
+        uint256 adlEquityThreshold,
+        uint256 minCollateralX18,
+        uint256 openingTime
+    ) internal {
         if (isMarket[baseToken]) revert MarketAlreadyExists();
         address insurance = insuranceAccount;
         if (fee > 0 && insurance == address(0)) revert InsuranceAccountNotSet();
@@ -131,7 +143,7 @@ contract PerpsPairFactory is Ownable {
         marketIdOf[baseToken] = marketId;
         ercs20Of[marketId] = baseToken;
 
-        emit PerpsMarketCreated(baseToken, marketId, adlEquityThreshold, minCollateralX18);
+        emit PerpsMarketCreated(baseToken, marketId, adlEquityThreshold, minCollateralX18, openingTime);
     }
 
     /// @dev Opening price = `usdcSeedAmount / totalSupply` (18-decimal fixed point) must be in (0, 1e16].
