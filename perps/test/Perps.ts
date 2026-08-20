@@ -139,22 +139,112 @@ describe("PerpsExchange", async function () {
 
     const makerBal = await exchange.read.balances([maker.account.address, MARKET_ID]);
     const takerBal = await exchange.read.balances([taker.account.address, MARKET_ID]);
-    // taker buy: pos +2, margin = 300 - 200 = 100; maker sell: pos -2, margin = 300 + 200 = 500
-    assert.equal(takerBal[1], amount);
-    assert.equal(takerBal[0], 100n * COL);
-    assert.equal(makerBal[1], -amount);
-    assert.equal(makerBal[0], 500n * COL);
     const { makerFee, takerFee } = tradeFees(amount, PRICE);
-    // locked margin + trading fee from vault free
-    assert.equal(
-      await vault.read.balances([taker.account.address]),
-      500n * COL - orderMargin - takerFee,
-    );
-    assert.equal(
-      await vault.read.balances([maker.account.address]),
-      500n * COL - orderMargin - makerFee,
-    );
+    // taker buy: pos +2, margin = 300 - 200 - takerFee; maker sell: pos -2, margin = 300 + 200 - makerFee
+    assert.equal(takerBal[1], amount);
+    assert.equal(takerBal[0], 100n * COL - takerFee);
+    assert.equal(makerBal[1], -amount);
+    assert.equal(makerBal[0], 500n * COL - makerFee);
+    // collateral pulled from vault free; fee taken from Balance.margin → protocolFees
+    assert.equal(await vault.read.balances([taker.account.address]), 500n * COL - orderMargin);
+    assert.equal(await vault.read.balances([maker.account.address]), 500n * COL - orderMargin);
     assert.equal(await vault.read.protocolFees(), makerFee + takerFee);
+  });
+
+  it("increasing position always pulls order.margin even if Balance.margin already covers want", async function () {
+    const ctx = await deployPerpsSystem();
+    const { viem, publicClient, maker, taker, operator, exchange, vault, MARKET_ID } = ctx;
+
+    const amount = 1n * COL;
+    const orderMargin = 200n * COL;
+    await fundAndDeposit(ctx, maker, 1000n * COL);
+    await fundAndDeposit(ctx, taker, 1000n * COL);
+
+    const exchangeAsOp = await viem.getContractAt("PerpsExchange", exchange.address, {
+      client: { public: publicClient, wallet: operator },
+    });
+    await settleOne(ctx, exchangeAsOp, maker, taker, amount, orderMargin, 1n, 1n);
+
+    const makerFreeAfterOpen = await vault.read.balances([maker.account.address]);
+    const takerFreeAfterOpen = await vault.read.balances([taker.account.address]);
+    const makerBalAfterOpen = await exchange.read.balances([maker.account.address, MARKET_ID]);
+    // Short already has margin ≫ second want; old ensureAtLeast would skip the pull.
+    assert.ok(makerBalAfterOpen[0] >= orderMargin);
+
+    await settleOne(ctx, exchangeAsOp, maker, taker, amount, orderMargin, 2n, 2n);
+
+    assert.equal(await vault.read.balances([maker.account.address]), makerFreeAfterOpen - orderMargin);
+    assert.equal(await vault.read.balances([taker.account.address]), takerFreeAfterOpen - orderMargin);
+    const makerBal = await exchange.read.balances([maker.account.address, MARKET_ID]);
+    const takerBal = await exchange.read.balances([taker.account.address, MARKET_ID]);
+    assert.equal(makerBal[1], -2n * amount);
+    assert.equal(takerBal[1], 2n * amount);
+  });
+
+  it("settleTrades can close when vault free is empty", async function () {
+    const ctx = await deployPerpsSystem();
+    const { viem, publicClient, chainId, maker, taker, operator, exchange, vault, MARKET_ID, PRICE } =
+      ctx;
+
+    const amount = 1n * COL;
+    const orderMargin = 200n * COL;
+    await fundAndDeposit(ctx, maker, orderMargin);
+    await fundAndDeposit(ctx, taker, orderMargin);
+
+    const exchangeAsOp = await viem.getContractAt("PerpsExchange", exchange.address, {
+      client: { public: publicClient, wallet: operator },
+    });
+    await settleOne(ctx, exchangeAsOp, maker, taker, amount, orderMargin, 1n, 1n);
+
+    assert.equal(await vault.read.balances([taker.account.address]), 0n);
+    assert.equal(await vault.read.balances([maker.account.address]), 0n);
+
+    // Close: opposite sides, order.margin=0 (no new collateral).
+    const expiry = BigInt(Math.floor(Date.now() / 1000) + 3600);
+    const closeMaker = {
+      trader: taker.account.address as Address,
+      marketId: MARKET_ID,
+      amount,
+      margin: 0n,
+      priceX18: PRICE,
+      isBuy: false,
+      nonce: 2n,
+      expiry,
+    };
+    const closeTaker = {
+      trader: maker.account.address as Address,
+      marketId: MARKET_ID,
+      amount,
+      margin: 0n,
+      priceX18: PRICE,
+      isBuy: true,
+      nonce: 2n,
+      expiry,
+    };
+    const closeMakerSig = await signPerpsOrder(taker, chainId, exchange.address, closeMaker);
+    const closeTakerSig = await signPerpsOrder(maker, chainId, exchange.address, closeTaker);
+
+    await exchangeAsOp.write.settleTrades([
+      [
+        {
+          takerOrder: closeTaker,
+          takerSignature: closeTakerSig,
+          makerOrders: [closeMaker],
+          makerSignatures: [closeMakerSig],
+          fulfillments: [{ amount, priceX18: PRICE }],
+        },
+      ],
+    ]);
+
+    const takerBal = await exchange.read.balances([taker.account.address, MARKET_ID]);
+    const makerBal = await exchange.read.balances([maker.account.address, MARKET_ID]);
+    assert.equal(takerBal[0], 0n);
+    assert.equal(takerBal[1], 0n);
+    assert.equal(makerBal[0], 0n);
+    assert.equal(makerBal[1], 0n);
+    // Flat accounts auto-return remaining margin to vault free.
+    assert.ok((await vault.read.balances([taker.account.address])) > 0n);
+    assert.ok((await vault.read.balances([maker.account.address])) > 0n);
   });
 
   it("session signer can sign orders for trader", async function () {
@@ -264,10 +354,11 @@ describe("PerpsExchange", async function () {
       exchange,
       oracle,
       MARKET_ID,
+      PRICE,
       ADL_THRESHOLD,
     } = ctx;
 
-    // High leverage long: lock 50, buy 1 @ 100 → margin=-50, pos=+1
+    // High leverage long: bring 50, buy 1 @ 100 → margin=-(50+takerFee), pos=+1
     const amount = 1n * COL;
     const orderMargin = 50n * COL;
     await fundAndDeposit(ctx, maker, 500n * COL);
@@ -278,7 +369,7 @@ describe("PerpsExchange", async function () {
       client: { public: publicClient, wallet: operator },
     });
     await settleOne(ctx, exchangeAsOp, maker, taker, amount, orderMargin, 1n, 1n);
-
+    const { takerFee } = tradeFees(amount, PRICE);
     // Drop mark so long is undercollateralized.
     await oracle.write.setPrice([MARKET_ID, 50n * COL]);
     await exchangeAsOp.write.liquidate([
@@ -292,8 +383,8 @@ describe("PerpsExchange", async function () {
     assert.equal(takerBal[1], 0n);
 
     const liqBal = await exchange.read.balances([liquidator.account.address, MARKET_ID]);
-    // L absorbs signed margin (-50) and position (+1)
-    assert.equal(liqBal[0], ADL_THRESHOLD - 50n * COL);
+    // L absorbs signed margin (-50 - takerFee) and position (+1)
+    assert.equal(liqBal[0], ADL_THRESHOLD - 50n * COL - takerFee);
     assert.equal(liqBal[1], amount);
   });
 
@@ -440,14 +531,15 @@ describe("PerpsExchange", async function () {
     await exchange.write.settleFunding([taker.account.address, MARKET_ID]);
     const takerIndex = await exchange.read.fundingIndex([MARKET_ID]);
     const takerBal = await exchange.read.balances([taker.account.address, MARKET_ID]);
-    // long pays: margin -= indexValue (position = 1e18)
-    assert.equal(takerBal[0], 100n * COL - takerIndex[1]);
+    const { makerFee, takerFee } = tradeFees(amount, 100n * COL);
+    // long pays: margin -= indexValue (position = 1e18); open left margin 100 - takerFee
+    assert.equal(takerBal[0], 100n * COL - takerFee - takerIndex[1]);
 
     await exchange.write.settleFunding([maker.account.address, MARKET_ID]);
     const makerIndex = await exchange.read.fundingIndex([MARKET_ID]);
     const makerBal = await exchange.read.balances([maker.account.address, MARKET_ID]);
-    // After open @100 lock 200: taker margin=100, maker=300
-    assert.equal(makerBal[0], 300n * COL + makerIndex[1]);
+    // After open @100 bring 200: maker margin = 300 - makerFee
+    assert.equal(makerBal[0], 300n * COL - makerFee + makerIndex[1]);
   });
 
   it("settleTrades updates lastPrice; updateFunding samples funder", async function () {
@@ -495,6 +587,7 @@ describe("PerpsExchange", async function () {
       client: { public: publicClient, wallet: operator },
     });
     await settleOne(ctx, exchangeAsOp, maker, taker, amount, orderMargin, 1n, 1n);
+    const { makerFee, takerFee } = tradeFees(amount, 100n * COL);
 
     // Higher settle price: long gains, short loses — both still solvent.
     const settlePrice = 110n * COL;
@@ -516,18 +609,18 @@ describe("PerpsExchange", async function () {
       "MarketIsPaused",
     );
 
-    // Taker long: margin=100 pos=+2 @ 110 → equity=320
+    // Taker long: margin=100-takerFee pos=+2 @ 110 → equity=320-takerFee
     const vaultBeforeTaker = await vault.read.balances([taker.account.address]);
     await exchangeAsTaker.write.withdrawFinalSettlement([MARKET_ID]);
     assert.equal(
       await vault.read.balances([taker.account.address]),
-      vaultBeforeTaker + 320n * COL,
+      vaultBeforeTaker + 320n * COL - takerFee,
     );
     const takerBal = await exchange.read.balances([taker.account.address, MARKET_ID]);
     assert.equal(takerBal[0], 0n);
     assert.equal(takerBal[1], 0n);
 
-    // Maker short: margin=500 pos=-2 @ 110 → equity=280
+    // Maker short: margin=500-makerFee pos=-2 @ 110 → equity=280-makerFee
     const vaultBeforeMaker = await vault.read.balances([maker.account.address]);
     const exchangeAsMaker = await viem.getContractAt("PerpsExchange", exchange.address, {
       client: { public: publicClient, wallet: maker },
@@ -535,7 +628,7 @@ describe("PerpsExchange", async function () {
     await exchangeAsMaker.write.withdrawFinalSettlement([MARKET_ID]);
     assert.equal(
       await vault.read.balances([maker.account.address]),
-      vaultBeforeMaker + 280n * COL,
+      vaultBeforeMaker + 280n * COL - makerFee,
     );
 
     // Owner can correct settlement price if mis-set; lockedAt stays from first enable.

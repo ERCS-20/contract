@@ -53,7 +53,7 @@ contract PerpsPairFactory is Ownable {
     /// @notice 0.05% taker fee (matches PerpsExchange TAKER_FEE 5/10_000).
     uint256 public constant TAKER_FEE_X18 = 0.0005e18;
     /// @notice Default min collateralization: 100% + liq fee + taker fee = 100.55%.
-    uint256 public constant DEFAULT_MIN_COLLATERAL_X18 = PerpsTypes.BASE + LIQUIDATION_FEE_X18 + TAKER_FEE_X18;
+    uint256 public constant DEFAULT_MIN_COLLATERAL_X18 = PerpsTypes.ONE_X18 + LIQUIDATION_FEE_X18 + TAKER_FEE_X18;
     uint256 public constant DEFAULT_FEE = 1000e18;
 
     event PerpsMarketCreated(
@@ -97,7 +97,7 @@ contract PerpsPairFactory is Ownable {
     }
 
     function setDefaultMinCollateral(uint256 minCollateralX18_) external onlyOwner {
-        if (minCollateralX18_ < PerpsTypes.BASE) revert InvalidMinCollateral();
+        if (minCollateralX18_ < PerpsTypes.ONE_X18) revert InvalidMinCollateral();
         defaultMinCollateralX18 = minCollateralX18_;
         emit DefaultMinCollateralSet(minCollateralX18_);
     }

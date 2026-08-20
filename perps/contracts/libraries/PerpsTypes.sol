@@ -2,11 +2,17 @@
 pragma solidity 0.8.28;
 
 library PerpsTypes {
-    uint256 internal constant BASE = 1e18;
+    /// @dev Fixed-point unit for `*X18` quantities (prices, ratios, funding index). 1.0 == 1e18.
+    uint256 internal constant ONE_X18 = 1e18;
 
-    /// @dev Continuous funding index per market (signed cumulative quote-per-base).
+    /// @dev Continuous funding index per market (global + per-account local copy).
     struct FundingIndex {
+        /// @dev Last accrual / sync time (`block.timestamp`).
         uint256 timestamp;
+        /// @dev Cumulative funding index in quote-per-base, 1e18 fixed-point.
+        ///      Accrual: `value += ±(unitlessFunding * markPriceX18) / ONE_X18`.
+        ///      Settle into margin: `margin += -(Δvalue * position) / ONE_X18`
+        ///      (`value`↑ → longs pay shorts; `value`↓ → shorts pay longs).
         int256 value;
     }
 
@@ -39,7 +45,7 @@ library PerpsTypes {
         uint256 lockedAt;
     }
 
-    /// @notice EIP-712 limit order. `margin` is total collateral to lock for the full `amount`.
+    /// @notice EIP-712 limit order. `margin` is collateral to bring for newly opened size (vault auto-tops up).
     struct Order {
         address trader;
         uint256 marketId;

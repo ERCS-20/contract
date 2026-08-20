@@ -48,9 +48,7 @@ contract GlobalPerpsVault is Ownable, Pausable, ReentrancyGuard {
     event ForcedWithdrawalRequested(address indexed user);
     event ForcedWithdrawalExecuted(address indexed user, uint256 amount);
     event UserBalanceAdjusted(address indexed user, uint256 indexed marketId, int256 delta);
-    event FreeDebitedForFill(
-        address indexed user, uint256 indexed marketId, uint256 collateral, uint256 fee
-    );
+    event ProtocolFeeCollected(uint256 indexed marketId, uint256 amount);
     event FeesClaimed(address indexed to, uint256 amount);
 
     error NotExchange();
@@ -219,18 +217,13 @@ contract GlobalPerpsVault is Ownable, Pausable, ReentrancyGuard {
         emit UserBalanceAdjusted(user, marketId, delta);
     }
 
-    /// @notice Debit free collateral for a fill: `collateral` → pot, `fee` → `protocolFees`.
-    function debitFreeForFill(address user, uint256 marketId, uint256 collateral, uint256 fee)
-        external
-        onlyExchange
-    {
-        uint256 total = collateral + fee;
-        if (total == 0) return;
-        if (balances[user] < total) revert InsufficientBalance();
-        balances[user] -= total;
-        marketPots[marketId] += collateral;
-        protocolFees += fee;
-        emit FreeDebitedForFill(user, marketId, collateral, fee);
+    /// @notice Move `amount` from `marketPots[marketId]` into `protocolFees` (fee taken from account margin).
+    function collectProtocolFee(uint256 marketId, uint256 amount) external onlyExchange {
+        if (amount == 0) return;
+        if (marketPots[marketId] < amount) revert InsufficientMarketPot();
+        marketPots[marketId] -= amount;
+        protocolFees += amount;
+        emit ProtocolFeeCollected(marketId, amount);
     }
 
     /// @notice Claim accumulated protocol fees to `claimFeeDAO`.

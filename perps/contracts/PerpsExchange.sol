@@ -16,8 +16,9 @@ import {GlobalPerpsVault} from "./GlobalPerpsVault.sol";
 /// @title PerpsExchange
 /// @notice Multi-market perpetual settlement with signed Balance{margin, position}.
 /// @dev GlobalPerpsVault holds shared free USDC. Per-market Balance is funded from the vault
-///      (order.margin on fill, or addMargin). Trades move margin↔position between Balances.
-///      Flat accounts return remaining margin to the vault. Funding uses a continuous per-market
+///      when margin is short (order.margin for opens, auto top-up). Trades move margin↔position
+///      between Balances; fees debit Balance.margin into protocolFees. Flat accounts return
+///      remaining margin to the vault. Funding uses a continuous per-market
 ///      index with lazy settlement into Balance.margin. Liquidations merge into approved liquidators.
 contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     using ECDSA for bytes32;
@@ -71,36 +72,51 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     event OracleSet(address indexed oracle);
     event FunderSet(address indexed funder);
     event FundingIndexUpdated(uint256 indexed marketId, int256 value, uint256 timestamp);
-    event FundingSettled(address indexed account, uint256 indexed marketId, int256 marginDelta);
+    event FundingSettled(
+        address indexed account, uint256 indexed marketId, int256 marginDelta, uint256 timestamp, int256 value
+    );
     event FundingSampled(uint256 indexed marketId, uint256 lastPriceX18, bool updated);
     event MarkSampled(uint256 indexed marketId, bool updated);
+    /// @notice `makerMarginIn` / `takerMarginIn` = collateral pulled this fill (0 on pure reduce).
+    ///         `makerMargin` / `makerPosition` / `taker*` = current Balance after fill, fees, and flat auto-return.
     event TradeSettled(
         uint256 indexed marketId,
         address indexed maker,
         address indexed taker,
         uint256 amount,
         uint256 priceX18,
-        bool takerIsBuy,
-        uint256 makerMargin,
-        uint256 takerMargin,
+        uint256 makerMarginIn,
+        uint256 takerMarginIn,
         uint256 makerFee,
-        uint256 takerFee
+        uint256 takerFee,
+        int256 makerMargin,
+        int256 makerPosition,
+        int256 takerMargin,
+        int256 takerPosition
     );
-    event MarginAdded(address indexed user, uint256 indexed marketId, uint256 amount);
+    event MarginAdded(
+        address indexed user, uint256 indexed marketId, uint256 amount, int256 margin, int256 position
+    );
     event Liquidated(
         uint256 indexed marketId,
         address indexed user,
         address indexed liquidator,
         int256 position,
         int256 marginSeized,
-        uint256 markPriceX18
+        uint256 markPriceX18,
+        int256 liquidatorMargin,
+        int256 liquidatorPosition
     );
     event AdlExecuted(
         uint256 indexed marketId,
         address indexed user,
         address indexed liquidator,
         int256 closedSize,
-        uint256 priceX18
+        uint256 priceX18,
+        int256 userMargin,
+        int256 userPosition,
+        int256 liquidatorMargin,
+        int256 liquidatorPosition
     );
     event FinalSettlementEnabled(uint256 indexed marketId, uint256 settlementPriceX18, uint256 lockedAt);
     event FinalSettlementWithdrawn(address indexed user, uint256 indexed marketId, uint256 amount);
@@ -204,7 +220,7 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     {
         if (ercs20 == address(0)) revert ZeroAddress();
         if (markets[marketId].exists) revert MarketExists();
-        if (minCollateralX18 < PerpsTypes.BASE) revert InvalidMinCollateral();
+        if (minCollateralX18 < PerpsTypes.ONE_X18) revert InvalidMinCollateral();
         markets[marketId] = PerpsTypes.Market({
             ercs20: ercs20,
             exists: true,
@@ -255,6 +271,11 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         emit FinalSettlementWithdrawn(msg.sender, marketId, payout);
     }
 
+    /// @notice Remaining native USDC in this market's vault pot (readable anytime; reclaim only after lock).
+    function remainingFinalSettlementPot(uint256 marketId) external view returns (uint256) {
+        return vault.marketPots(marketId);
+    }
+
     /// @notice After `FINAL_SETTLEMENT_LOCK`, DAO moves the entire leftover market pot to its vault free balance.
     function reclaimFinalSettlementPot(uint256 marketId) external onlyDAO nonReentrant {
         PerpsTypes.MarketSettlement storage s = marketSettlements[marketId];
@@ -283,12 +304,13 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         vault.adjustUserBalance(account, marketId, -int256(amount));
         _creditMargin(account, marketId, int256(amount));
 
-        emit MarginAdded(account, marketId, amount);
+        PerpsTypes.Balance memory bal = balances[account][marketId];
+        emit MarginAdded(account, marketId, amount, bal.margin, bal.position);
     }
 
     function setMinCollateral(uint256 marketId, uint256 minCollateralX18) external onlyDAO {
         _requireMarket(marketId);
-        if (minCollateralX18 < PerpsTypes.BASE) revert InvalidMinCollateral();
+        if (minCollateralX18 < PerpsTypes.ONE_X18) revert InvalidMinCollateral();
         markets[marketId].minCollateralX18 = minCollateralX18;
     }
 
@@ -348,7 +370,8 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         _settleAccountFunding(msg.sender, marketId, index);
         vault.adjustUserBalance(msg.sender, marketId, -int256(amount));
         _creditMargin(msg.sender, marketId, int256(amount));
-        emit MarginAdded(msg.sender, marketId, amount);
+        PerpsTypes.Balance memory bal = balances[msg.sender][marketId];
+        emit MarginAdded(msg.sender, marketId, amount, bal.margin, bal.position);
     }
 
     /// @dev Prefer one market per call. `lastPrice` / funding sample use the last settlement's last fill.
@@ -405,7 +428,9 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         _setBalance(liquidator, marketId, liqBal);
         _clearBalance(user, marketId);
 
-        emit Liquidated(marketId, user, liquidator, userBal.position, userBal.margin, mark);
+        emit Liquidated(
+            marketId, user, liquidator, userBal.position, userBal.margin, mark, liqBal.margin, liqBal.position
+        );
     }
 
     /// @notice ADL: force trade user against liquidator at mark when L margin ≤ threshold.
@@ -440,7 +465,19 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         _tryReturnMarginToVault(user, marketId);
         _tryReturnMarginToVault(liquidator, marketId);
 
-        emit AdlExecuted(marketId, user, liquidator, userIsBuy ? int256(amount) : -int256(amount), mark);
+        PerpsTypes.Balance memory userAfter = balances[user][marketId];
+        PerpsTypes.Balance memory liqAfter = balances[liquidator][marketId];
+        emit AdlExecuted(
+            marketId,
+            user,
+            liquidator,
+            userIsBuy ? int256(amount) : -int256(amount),
+            mark,
+            userAfter.margin,
+            userAfter.position,
+            liqAfter.margin,
+            liqAfter.position
+        );
     }
 
     function isAdlTriggered(uint256 marketId, address liquidator) external view returns (bool) {
@@ -488,10 +525,10 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
             _consumeFill(makerOrder, s.makerSignatures[i], fill.amount);
             takerFilled += fill.amount;
 
-            (uint256 makerMargin, uint256 makerFee) =
-                _lockFillMarginAndFee(makerOrder, fill.amount, fill.priceX18, false);
-            (uint256 takerMargin, uint256 takerFee) =
-                _lockFillMarginAndFee(takerOrder, fill.amount, fill.priceX18, true);
+            (uint256 makerFee, uint256 makerMarginIn) =
+                _prepareSide(makerOrder, fill.amount, fill.priceX18, false);
+            (uint256 takerFee, uint256 takerMarginIn) =
+                _prepareSide(takerOrder, fill.amount, fill.priceX18, true);
 
             PerpsTypes.Balance memory makerBal = balances[makerOrder.trader][marketId];
             PerpsTypes.Balance memory takerBal = balances[takerOrder.trader][marketId];
@@ -499,22 +536,31 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
             (PerpsTypes.Balance memory newTaker, PerpsTypes.Balance memory newMaker) =
                 PerpsMath.applyTrade(takerBal, makerBal, fill.amount, fill.priceX18, takerOrder.isBuy);
 
+            newMaker.margin -= int256(makerFee);
+            newTaker.margin -= int256(takerFee);
             _setBalance(makerOrder.trader, marketId, newMaker);
             _setBalance(takerOrder.trader, marketId, newTaker);
+            vault.collectProtocolFee(marketId, makerFee + takerFee);
+
             _tryReturnMarginToVault(makerOrder.trader, marketId);
             _tryReturnMarginToVault(takerOrder.trader, marketId);
 
+            PerpsTypes.Balance memory makerAfter = balances[makerOrder.trader][marketId];
+            PerpsTypes.Balance memory takerAfter = balances[takerOrder.trader][marketId];
             emit TradeSettled(
                 marketId,
                 makerOrder.trader,
                 takerOrder.trader,
                 fill.amount,
                 fill.priceX18,
-                takerOrder.isBuy,
-                makerMargin,
-                takerMargin,
+                makerMarginIn,
+                takerMarginIn,
                 makerFee,
-                takerFee
+                takerFee,
+                makerAfter.margin,
+                makerAfter.position,
+                takerAfter.margin,
+                takerAfter.position
             );
 
             unchecked {
@@ -532,14 +578,13 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         emit FundingSampled(marketId, m.lastPriceX18, updated);
     }
 
-    /// @dev Optional sampler (TWAP). MockOracle without `update` is ignored via try/catch.
+    /// @dev Optional sampler (TWAP). Oracle must implement `IOracleSampler.update`.
     function _sampleMark(uint256 marketId) private {
         address oracle_ = oracle;
         if (oracle_ == address(0)) return;
         address ercs20 = markets[marketId].ercs20;
-        try IOracleSampler(oracle_).update(marketId, ercs20) returns (bool updated) {
-            emit MarkSampled(marketId, updated);
-        } catch {}
+        bool updated = IOracleSampler(oracle_).update(marketId, ercs20);
+        emit MarkSampled(marketId, updated);
     }
 
     /// @dev Advance continuous funding index: Δindex += ±(unitlessFunding * mark / 1e18).
@@ -558,7 +603,7 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         if (funder != address(0)) {
             uint256 mark = IPerpsOracle(oracle).getPrice(marketId);
             (bool positive, uint256 unitless) = IFundingOracle(funder).getFunding(marketId, timeDelta);
-            int256 delta = int256((unitless * mark) / PerpsTypes.BASE);
+            int256 delta = int256((unitless * mark) / PerpsTypes.ONE_X18);
             if (!positive) delta = -delta;
             index.value += delta;
         }
@@ -570,38 +615,65 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
 
     function _settleAccountFunding(address account, uint256 marketId, PerpsTypes.FundingIndex memory globalIndex)
         private
+        returns (int256 marginDelta)
     {
         PerpsTypes.FundingIndex storage local = localFundingIndex[account][marketId];
-        if (local.timestamp == globalIndex.timestamp) return;
+        if (local.timestamp == globalIndex.timestamp) return 0;
 
         int256 indexDelta = globalIndex.value - local.value;
         local.timestamp = globalIndex.timestamp;
         local.value = globalIndex.value;
 
         PerpsTypes.Balance storage b = balances[account][marketId];
-        if (b.position == 0 || indexDelta == 0) return;
+        if (b.position != 0 && indexDelta != 0) {
+            marginDelta = PerpsMath.fundingMarginDelta(indexDelta, b.position);
+            b.margin += marginDelta;
+        }
 
-        int256 marginDelta = PerpsMath.fundingMarginDelta(indexDelta, b.position);
-        b.margin += marginDelta;
-        emit FundingSettled(account, marketId, marginDelta);
+        emit FundingSettled(account, marketId, marginDelta, local.timestamp, local.value);
     }
 
-    /// @dev Lock fill collateral + trading fee from vault free.
-    ///      Only collateral is credited to Balance.margin; fee goes to protocolFees.
-    function _lockFillMarginAndFee(
+    /// @dev Opening/increasing size always pulls proportional `order.margin` from vault free into Balance.
+    ///      Pure reduce pulls nothing (fee is debited from existing margin afterward).
+    ///      Buys do not prefund full notional — signed margin may go negative after `applyTrade`.
+    /// @return fee Trading fee for this fill.
+    /// @return want Collateral pulled this fill (`0` on pure reduce).
+    function _prepareSide(
         PerpsTypes.Order calldata order,
         uint256 fillAmount,
         uint256 fillPriceX18,
         bool isTaker
-    ) private returns (uint256 toLock, uint256 fee) {
-        toLock = PerpsMath.fillMargin(order.margin, order.amount, fillAmount);
-        uint256 notional = (fillAmount * fillPriceX18) / PerpsTypes.BASE;
+    ) private returns (uint256 fee, uint256 want) {
+        uint256 notional = (fillAmount * fillPriceX18) / PerpsTypes.ONE_X18;
         fee = isTaker
             ? (notional * TAKER_FEE_NUMERATOR) / FEE_DENOMINATOR
             : (notional * MAKER_FEE_NUMERATOR) / FEE_DENOMINATOR;
 
-        vault.debitFreeForFill(order.trader, order.marketId, toLock, fee);
-        _creditMargin(order.trader, order.marketId, int256(toLock));
+        PerpsTypes.Balance storage b = balances[order.trader][order.marketId];
+        uint256 opening = _openingSize(order.isBuy, b.position, fillAmount);
+        if (opening == 0) return (fee, 0);
+
+        want = PerpsMath.fillMargin(order.margin, order.amount, opening);
+        _pullMargin(order.trader, order.marketId, want);
+    }
+
+    /// @dev Size of `fillAmount` that increases exposure (not closing existing opposite position).
+    function _openingSize(bool isBuy, int256 position, uint256 fillAmount) private pure returns (uint256) {
+        if (isBuy) {
+            if (position >= 0) return fillAmount;
+            uint256 short = uint256(-position);
+            return fillAmount > short ? fillAmount - short : 0;
+        }
+        if (position <= 0) return fillAmount;
+        uint256 long_ = uint256(position);
+        return fillAmount > long_ ? fillAmount - long_ : 0;
+    }
+
+    /// @dev Always move `amount` from vault free → market pot and credit Balance.margin (ignores existing margin).
+    function _pullMargin(address user, uint256 marketId, uint256 amount) private {
+        if (amount == 0) return;
+        vault.adjustUserBalance(user, marketId, -int256(amount));
+        balances[user][marketId].margin += int256(amount);
     }
 
     function _creditMargin(address user, uint256 marketId, int256 amount) private {
