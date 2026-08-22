@@ -73,7 +73,7 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     event FunderSet(address indexed funder);
     event FundingIndexUpdated(uint256 indexed marketId, int256 value, uint256 timestamp);
     event FundingSettled(
-        address indexed account, uint256 indexed marketId, int256 marginDelta, uint256 timestamp, int256 value
+        address indexed account, uint256 indexed marketId, int256 marginDelta, uint256 localTimestamp, uint256 globalTimestamp
     );
     event FundingSampled(uint256 indexed marketId, uint256 lastPriceX18, bool updated);
     event MarkSampled(uint256 indexed marketId, bool updated);
@@ -620,6 +620,8 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         PerpsTypes.FundingIndex storage local = localFundingIndex[account][marketId];
         if (local.timestamp == globalIndex.timestamp) return 0;
 
+        uint256 localTimestamp = local.timestamp;
+
         int256 indexDelta = globalIndex.value - local.value;
         local.timestamp = globalIndex.timestamp;
         local.value = globalIndex.value;
@@ -630,7 +632,7 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
             b.margin += marginDelta;
         }
 
-        emit FundingSettled(account, marketId, marginDelta, local.timestamp, local.value);
+        emit FundingSettled(account, marketId, marginDelta, localTimestamp, globalIndex.timestamp);
     }
 
     /// @dev Opening/increasing size always pulls proportional `order.margin` from vault free into Balance.
