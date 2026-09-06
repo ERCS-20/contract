@@ -79,21 +79,7 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     event MarkSampled(uint256 indexed marketId, bool updated);
     /// @notice `makerMarginIn` / `takerMarginIn` = collateral pulled this fill (0 on pure reduce).
     ///         `makerMargin` / `makerPosition` / `taker*` = current Balance after fill, fees, and flat auto-return.
-    event TradeSettled(
-        uint256 indexed marketId,
-        address indexed maker,
-        address indexed taker,
-        uint256 amount,
-        uint256 priceX18,
-        uint256 makerMarginIn,
-        uint256 takerMarginIn,
-        uint256 makerFee,
-        uint256 takerFee,
-        int256 makerMargin,
-        int256 makerPosition,
-        int256 takerMargin,
-        int256 takerPosition
-    );
+    event TradeSettled(uint256 indexed marketId, address indexed maker, address indexed taker, uint256 amount, uint256 priceX18, uint256 makerMarginIn, uint256 takerMarginIn, uint256 makerFee, uint256 takerFee);
     event MarginAdded(
         address indexed user, uint256 indexed marketId, uint256 amount, int256 margin, int256 position
     );
