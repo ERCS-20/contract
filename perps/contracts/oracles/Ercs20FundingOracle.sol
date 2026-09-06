@@ -32,14 +32,7 @@ contract Ercs20FundingOracle is Ownable, IFundingOracle {
 
     mapping(uint256 => MarketState) public markets;
 
-    event FundingRateSampled(
-        uint256 indexed marketId,
-        uint256 lastPriceX18,
-        uint256 spotX18,
-        int256 premiumX18,
-        bool positive,
-        uint256 ratePerSecondX18
-    );
+    event FundingRateSampled(uint256 indexed marketId, uint256 lastPriceX18, uint256 spotX18, int256 premiumX18,bool positive, uint256 ratePerSecondX18);
 
     error NotExchange();
     error ZeroAddress();
