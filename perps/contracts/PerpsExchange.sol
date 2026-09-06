@@ -516,8 +516,11 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
             (uint256 takerFee, uint256 takerMarginIn) =
                 _prepareSide(takerOrder, fill.amount, fill.priceX18, true);
 
+            // Credit pulled collateral in memory, then apply fill + fees in one storage write.
             PerpsTypes.Balance memory makerBal = balances[makerOrder.trader][marketId];
             PerpsTypes.Balance memory takerBal = balances[takerOrder.trader][marketId];
+            makerBal.margin += int256(makerMarginIn);
+            takerBal.margin += int256(takerMarginIn);
 
             (PerpsTypes.Balance memory newTaker, PerpsTypes.Balance memory newMaker) =
                 PerpsMath.applyTrade(takerBal, makerBal, fill.amount, fill.priceX18, takerOrder.isBuy);
@@ -531,8 +534,6 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
             _tryReturnMarginToVault(makerOrder.trader, marketId);
             _tryReturnMarginToVault(takerOrder.trader, marketId);
 
-            PerpsTypes.Balance memory makerAfter = balances[makerOrder.trader][marketId];
-            PerpsTypes.Balance memory takerAfter = balances[takerOrder.trader][marketId];
             emit TradeSettled(
                 marketId,
                 makerOrder.trader,
@@ -617,7 +618,8 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         emit FundingSettled(account, marketId, marginDelta, localTimestamp, globalIndex.timestamp, globalIndex.value);
     }
 
-    /// @dev Opening/increasing size always pulls proportional `order.margin` from vault free into Balance.
+    /// @dev Opening/increasing size always pulls proportional `order.margin` from vault free (pot only).
+    ///      Balance.margin is credited later in the same settle writeback as the fill.
     ///      Pure reduce pulls nothing (fee is debited from existing margin afterward).
     ///      Buys do not prefund full notional — signed margin may go negative after `applyTrade`.
     /// @return fee Trading fee for this fill.
@@ -653,11 +655,10 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         return fillAmount > long_ ? fillAmount - long_ : 0;
     }
 
-    /// @dev Always move `amount` from vault free → market pot and credit Balance.margin (ignores existing margin).
+    /// @dev Move `amount` from vault free → market pot. Caller credits Balance.margin in the same writeback.
     function _pullMargin(address user, uint256 marketId, uint256 amount) private {
         if (amount == 0) return;
         vault.adjustUserBalance(user, marketId, -int256(amount));
-        balances[user][marketId].margin += int256(amount);
     }
 
     function _creditMargin(address user, uint256 marketId, int256 amount) private {
