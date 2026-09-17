@@ -56,6 +56,11 @@ npx hardhat test test/token/ercs20/ERCS20.ts
 npx hardhat test test/token/ercs20/ERCS20Factory.ts
 ```
 
+## Run
+```bash
+npx hardhat run scripts/deploy.js --network local_host
+```
+
 Some factory tests use **`hardhat_setBalance`** to fund the factory with native balance (the factory has no `receive` / `fallback`).
 
 ---
