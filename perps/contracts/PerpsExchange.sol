@@ -36,9 +36,9 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
 
     GlobalPerpsVault public vault;
     address public factory;
-    /// @notice Shared mark oracle for all markets (e.g. Ercs20TwapOracle).
+    /// @notice Shared mark oracle for all markets (e.g. Ercs20TwapOracle). Required before createMarket.
     address public oracle;
-    /// @notice Shared funding oracle for all markets; address(0) disables funding.
+    /// @notice Shared funding oracle for all markets. Required before createMarket; cannot be cleared.
     address public funder;
 
     /// @notice Protocol DAOs authorized for admin configuration (vault, oracles, pause, etc.).
@@ -204,7 +204,7 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         external
         onlyFactory
     {
-        if (ercs20 == address(0)) revert ZeroAddress();
+        if (ercs20 == address(0) || oracle == address(0) || funder == address(0)) revert ZeroAddress();
         if (markets[marketId].exists) revert MarketExists();
         if (minCollateralX18 < PerpsTypes.ONE_X18) revert InvalidMinCollateral();
         markets[marketId] = PerpsTypes.Market({
@@ -313,11 +313,13 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     }
 
     function setOracle(address oracle_) external onlyDAO {
+        if (oracle_ == address(0)) revert ZeroAddress();
         oracle = oracle_;
         emit OracleSet(oracle_);
     }
 
     function setFunder(address funder_) external onlyDAO {
+        if (funder_ == address(0)) revert ZeroAddress();
         funder = funder_;
         emit FunderSet(funder_);
     }
@@ -341,7 +343,7 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         _sampleFunding(marketId, m);
     }
 
-    /// @notice Sample mark oracle (TWAP cumulative) when idle. no-op if oracle has no sampler.
+    /// @notice Sample mark oracle (TWAP cumulative) when idle.
     function updateMark(uint256 marketId) external onlyOperator {
         _requireMarket(marketId);
         _sampleMark(marketId);
@@ -360,27 +362,28 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         emit MarginAdded(msg.sender, marketId, amount, bal.margin, bal.position);
     }
 
-    /// @dev Prefer one market per call. `lastPrice` / funding sample use the last settlement's last fill.
+    /// @dev Caller must group by `marketId` (backend sorts fills by pairId). Each contiguous
+    ///      run samples mark once before fills and funding once after that run's last fill.
     function settleTrades(PerpsTypes.TradeSettlement[] calldata settlements) external onlyOperator {
         uint256 length = settlements.length;
+        if (length == 0) return;
+
+        uint256 runMarketId = settlements[0].takerOrder.marketId;
+        _sampleMark(runMarketId);
+
         for (uint256 i; i < length;) {
+            uint256 marketId = settlements[i].takerOrder.marketId;
+            if (marketId != runMarketId) {
+                _sampleFunding(runMarketId, markets[runMarketId]);
+                runMarketId = marketId;
+                _sampleMark(runMarketId);
+            }
             _settleTrades(settlements[i]);
             unchecked {
                 ++i;
             }
         }
-
-        if (length == 0) return;
-
-        PerpsTypes.TradeSettlement calldata last = settlements[length - 1];
-        uint256 fillLen = last.fulfillments.length;
-        if (fillLen == 0) return;
-
-        uint256 marketId = last.takerOrder.marketId;
-        PerpsTypes.Market storage m = markets[marketId];
-        m.lastPriceX18 = last.fulfillments[fillLen - 1].priceX18;
-        _sampleFunding(marketId, m);
-        _sampleMark(marketId);
+        _sampleFunding(runMarketId, markets[runMarketId]);
     }
 
     /// @notice Liquidate user into `liquidator`: merge full Balance (margin + position, signed).
@@ -553,20 +556,18 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
 
         if (takerFilled > takerOrder.amount) revert OrderOverfilled();
         filledAmount[takerHash] = takerFilled;
+        markets[marketId].lastPriceX18 = s.fulfillments[length - 1].priceX18;
     }
 
     function _sampleFunding(uint256 marketId, PerpsTypes.Market storage m) private {
-        if (funder == address(0) || m.lastPriceX18 == 0) return;
+        if (m.lastPriceX18 == 0) return;
         bool updated = IFundingOracle(funder).update(marketId, m.lastPriceX18, m.ercs20);
         emit FundingSampled(marketId, m.lastPriceX18, updated);
     }
 
-    /// @dev Optional sampler (TWAP). Oracle must implement `IOracleSampler.update`.
+    /// @dev TWAP sampler. Oracle must implement `IOracleSampler.update`.
     function _sampleMark(uint256 marketId) private {
-        address oracle_ = oracle;
-        if (oracle_ == address(0)) return;
-        address ercs20 = markets[marketId].ercs20;
-        bool updated = IOracleSampler(oracle_).update(marketId, ercs20);
+        bool updated = IOracleSampler(oracle).update(marketId, markets[marketId].ercs20);
         emit MarkSampled(marketId, updated);
     }
 
@@ -583,13 +584,11 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         uint256 timeDelta = block.timestamp - index.timestamp;
         if (timeDelta == 0) return index;
 
-        if (funder != address(0)) {
-            uint256 mark = IPerpsOracle(oracle).getPrice(marketId);
-            (bool positive, uint256 unitless) = IFundingOracle(funder).getFunding(marketId, timeDelta);
-            int256 delta = int256((unitless * mark) / PerpsTypes.ONE_X18);
-            if (!positive) delta = -delta;
-            index.value += delta;
-        }
+        uint256 mark = IPerpsOracle(oracle).getPrice(marketId);
+        (bool positive, uint256 unitless) = IFundingOracle(funder).getFunding(marketId, timeDelta);
+        int256 delta = int256((unitless * mark) / PerpsTypes.ONE_X18);
+        if (!positive) delta = -delta;
+        index.value += delta;
 
         index.timestamp = block.timestamp;
         fundingIndex[marketId] = index;

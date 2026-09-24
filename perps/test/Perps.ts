@@ -3,7 +3,9 @@ import { describe, it } from "node:test";
 
 import type { Address, WalletClient } from "viem";
 
-import { deployPerpsSystem, fundAndDeposit, fundDepositAndAddMargin } from "./helpers/fixture.js";
+import { network } from "hardhat";
+
+import { deployPerpsSystem, fundAndDeposit, fundDepositAndAddMargin, ADL_THRESHOLD, MIN_COLLATERAL } from "./helpers/fixture.js";
 import { signPerpsOrder, signPerpsWithdraw } from "./helpers/eip712.js";
 
 const COL = 10n ** 18n;
@@ -122,7 +124,29 @@ describe("GlobalPerpsVault", async function () {
   });
 });
 
+const ZERO = "0x0000000000000000000000000000000000000000";
+
 describe("PerpsExchange", async function () {
+  it("rejects zero oracle/funder and createMarket before they are set", async function () {
+    const { viem, publicClient } = await network.connect();
+    const [deployer, dao] = await viem.getWalletClients();
+    const exchange = await viem.deployContract("PerpsExchange", []);
+    await exchange.write.setDAO([dao.account.address, true]);
+    const exchangeAsDao = await viem.getContractAt("PerpsExchange", exchange.address, {
+      client: { public: publicClient, wallet: dao },
+    });
+
+    await viem.assertions.revertWithCustomError(exchangeAsDao.write.setOracle([ZERO]), exchange, "ZeroAddress");
+    await viem.assertions.revertWithCustomError(exchangeAsDao.write.setFunder([ZERO]), exchange, "ZeroAddress");
+
+    await exchange.write.setFactory([deployer.account.address]);
+    await viem.assertions.revertWithCustomError(
+      exchange.write.createMarket([1n, "0x0000000000000000000000000000000000000001", ADL_THRESHOLD, MIN_COLLATERAL]),
+      exchange,
+      "ZeroAddress",
+    );
+  });
+
   it("settleTrades opens opposite positions with Balance margin", async function () {
     const ctx = await deployPerpsSystem();
     const { viem, publicClient, maker, taker, operator, exchange, vault, MARKET_ID, PRICE } = ctx;
@@ -562,6 +586,88 @@ describe("PerpsExchange", async function () {
 
     await exchangeAsOp.write.updateFunding([MARKET_ID]);
     assert.equal(await funder.read.updateCount(), 2n);
+  });
+
+  it("settleTrades samples funding once per contiguous marketId run", async function () {
+    const ctx = await deployPerpsSystem();
+    const {
+      viem,
+      publicClient,
+      chainId,
+      maker,
+      taker,
+      operator,
+      funder,
+      oracle,
+      exchange,
+      MARKET_ID,
+      PRICE,
+    } = ctx;
+
+    const MARKET_B = 2n;
+    await exchange.write.createMarket([
+      MARKET_B,
+      "0x0000000000000000000000000000000000000002",
+      ADL_THRESHOLD,
+      MIN_COLLATERAL,
+    ]);
+    await oracle.write.setPrice([MARKET_B, PRICE]);
+
+    await fundAndDeposit(ctx, maker, 2000n * COL);
+    await fundAndDeposit(ctx, taker, 2000n * COL);
+
+    const exchangeAsOp = await viem.getContractAt("PerpsExchange", exchange.address, {
+      client: { public: publicClient, wallet: operator },
+    });
+
+    async function settlement(marketId: bigint, makerNonce: bigint, takerNonce: bigint) {
+      const expiry = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const amount = 1n * COL;
+      const orderMargin = 200n * COL;
+      const makerAddr = maker.account!.address as Address;
+      const takerAddr = taker.account!.address as Address;
+      const makerOrder = {
+        trader: makerAddr,
+        marketId,
+        amount,
+        margin: orderMargin,
+        priceX18: PRICE,
+        isBuy: false,
+        nonce: makerNonce,
+        expiry,
+      };
+      const takerOrder = {
+        trader: takerAddr,
+        marketId,
+        amount,
+        margin: orderMargin,
+        priceX18: PRICE,
+        isBuy: true,
+        nonce: takerNonce,
+        expiry,
+      };
+      return {
+        takerOrder,
+        takerSignature: await signPerpsOrder(taker, chainId, exchange.address, takerOrder),
+        makerOrders: [makerOrder],
+        makerSignatures: [await signPerpsOrder(maker, chainId, exchange.address, makerOrder)],
+        fulfillments: [{ amount, priceX18: PRICE }],
+      };
+    }
+
+    await exchangeAsOp.write.settleTrades([
+      [await settlement(MARKET_ID, 1n, 1n), await settlement(MARKET_ID, 2n, 2n)],
+    ]);
+    assert.equal(await funder.read.updateCount(), 1n);
+    const [, , , , , lastA] = await exchange.read.markets([MARKET_ID]);
+    assert.equal(lastA, PRICE);
+
+    await exchangeAsOp.write.settleTrades([
+      [await settlement(MARKET_ID, 3n, 3n), await settlement(MARKET_B, 4n, 4n)],
+    ]);
+    assert.equal(await funder.read.updateCount(), 3n);
+    const [, , , , , lastB] = await exchange.read.markets([MARKET_B]);
+    assert.equal(lastB, PRICE);
   });
 
   it("final settlement: users withdraw equity at settlement price", async function () {
