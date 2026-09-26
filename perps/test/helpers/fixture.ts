@@ -81,12 +81,11 @@ export async function fundAndDeposit(ctx: PerpsCtx, wallet: PerpsCtx["maker"], a
   await vaultAsUser.write.deposit({ value: amount });
 }
 
-/** Deposit then lock `amount` into market Balance.margin for `wallet`. */
-export async function fundDepositAndAddMargin(ctx: PerpsCtx, wallet: PerpsCtx["maker"], amount: bigint) {
+/** Liquidator-only: deposit native USDC into market Balance.margin (no position required). */
+export async function seedInsuranceMargin(ctx: PerpsCtx, wallet: PerpsCtx["maker"], amount: bigint) {
   const { viem, publicClient, exchange, MARKET_ID } = ctx;
-  await fundAndDeposit(ctx, wallet, amount);
   const exchangeAsUser = await viem.getContractAt("PerpsExchange", exchange.address, {
     client: { public: publicClient, wallet },
   });
-  await exchangeAsUser.write.addMargin([MARKET_ID, amount]);
+  await exchangeAsUser.write.seedInsuranceMargin([MARKET_ID, wallet.account.address], { value: amount });
 }

@@ -5,7 +5,7 @@ import type { Address, WalletClient } from "viem";
 
 import { network } from "hardhat";
 
-import { deployPerpsSystem, fundAndDeposit, fundDepositAndAddMargin, ADL_THRESHOLD, MIN_COLLATERAL } from "./helpers/fixture.js";
+import { deployPerpsSystem, fundAndDeposit, seedInsuranceMargin, ADL_THRESHOLD, MIN_COLLATERAL } from "./helpers/fixture.js";
 import { signPerpsOrder, signPerpsWithdraw } from "./helpers/eip712.js";
 
 const COL = 10n ** 18n;
@@ -173,6 +173,33 @@ describe("PerpsExchange", async function () {
     assert.equal(await vault.read.balances([taker.account.address]), 500n * COL - orderMargin);
     assert.equal(await vault.read.balances([maker.account.address]), 500n * COL - orderMargin);
     assert.equal(await vault.read.protocolFees(), makerFee + takerFee);
+  });
+
+  it("addMargin requires an open position", async function () {
+    const ctx = await deployPerpsSystem();
+    const { viem, publicClient, maker, taker, operator, exchange, MARKET_ID } = ctx;
+
+    await fundAndDeposit(ctx, taker, 500n * COL);
+    const exchangeAsTaker = await viem.getContractAt("PerpsExchange", exchange.address, {
+      client: { public: publicClient, wallet: taker },
+    });
+    await viem.assertions.revertWithCustomError(
+      exchangeAsTaker.write.addMargin([MARKET_ID, 1n * COL]),
+      exchange,
+      "NoPosition",
+    );
+
+    await fundAndDeposit(ctx, maker, 500n * COL);
+    const exchangeAsOp = await viem.getContractAt("PerpsExchange", exchange.address, {
+      client: { public: publicClient, wallet: operator },
+    });
+    await settleOne(ctx, exchangeAsOp, maker, taker, 1n * COL, 200n * COL, 1n, 1n);
+
+    const [marginBefore, posBefore] = await exchange.read.balances([taker.account.address, MARKET_ID]);
+    await exchangeAsTaker.write.addMargin([MARKET_ID, 10n * COL]);
+    const [marginAfter, posAfter] = await exchange.read.balances([taker.account.address, MARKET_ID]);
+    assert.equal(posAfter, posBefore);
+    assert.equal(marginAfter, marginBefore + 10n * COL);
   });
 
   it("increasing position always pulls order.margin even if Balance.margin already covers want", async function () {
@@ -387,7 +414,7 @@ describe("PerpsExchange", async function () {
     const orderMargin = 50n * COL;
     await fundAndDeposit(ctx, maker, 500n * COL);
     await fundAndDeposit(ctx, taker, 500n * COL);
-    await fundDepositAndAddMargin(ctx, liquidator, ADL_THRESHOLD);
+    await seedInsuranceMargin(ctx, liquidator, ADL_THRESHOLD);
 
     const exchangeAsOp = await viem.getContractAt("PerpsExchange", exchange.address, {
       client: { public: publicClient, wallet: operator },
@@ -434,7 +461,7 @@ describe("PerpsExchange", async function () {
     await fundAndDeposit(ctx, maker, 500n * COL);
     await fundAndDeposit(ctx, taker, 500n * COL);
     // After absorb user -50: margin == threshold (ADL armed); ADL quote 50 leaves parked remainder.
-    await fundDepositAndAddMargin(ctx, liquidator, adlThreshold + 50n * COL);
+    await seedInsuranceMargin(ctx, liquidator, adlThreshold + 50n * COL);
 
     const exchangeAsDao = await viem.getContractAt("PerpsExchange", exchange.address, {
       client: { public: publicClient, wallet: dao },
@@ -488,7 +515,7 @@ describe("PerpsExchange", async function () {
     await fundAndDeposit(ctx, maker, 500n * COL);
     await fundAndDeposit(ctx, taker, 500n * COL);
     // After absorbing user margin=-50, L.margin == threshold ⇒ ADL armed.
-    await fundDepositAndAddMargin(ctx, liquidator, ADL_THRESHOLD + 50n * COL);
+    await seedInsuranceMargin(ctx, liquidator, ADL_THRESHOLD + 50n * COL);
 
     const exchangeAsOp = await viem.getContractAt("PerpsExchange", exchange.address, {
       client: { public: publicClient, wallet: operator },

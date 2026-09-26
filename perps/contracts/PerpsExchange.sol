@@ -80,9 +80,10 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     /// @notice `makerMarginIn` / `takerMarginIn` = collateral pulled this fill (0 on pure reduce).
     ///         `makerMargin` / `makerPosition` / `taker*` = current Balance after fill, fees, and flat auto-return.
     event TradeSettled(uint256 indexed marketId, address indexed maker, address indexed taker, uint256 amount, uint256 priceX18, uint256 makerMarginIn, uint256 takerMarginIn, uint256 makerFee, uint256 takerFee);
-    event MarginAdded(
-        address indexed user, uint256 indexed marketId, uint256 amount, int256 margin, int256 position
-    );
+    event MarginAdded(address indexed user, uint256 indexed marketId, uint256 amount, int256 margin, int256 position);
+    event MarginRemoved(address indexed user, uint256 indexed marketId, uint256 amount, int256 margin, int256 position);
+    event MarginSettled(address indexed user, uint256 indexed marketId, int256 amount);
+
     event Liquidated(
         uint256 indexed marketId,
         address indexed user,
@@ -133,6 +134,7 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     error NotLiquidator();
     error LiquidatorCannotTake();
     error NoLastPrice();
+    error NoPosition();
 
     modifier onlyOperator() {
         if (!isOperator[msg.sender]) revert NotOperator();
@@ -349,11 +351,12 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         _sampleMark(marketId);
     }
 
-    /// @notice Move free vault collateral into this market's Balance.margin.
+    /// @notice Move free vault collateral into this market's Balance.margin. Requires an open position.
     function addMargin(uint256 marketId, uint256 amount) external nonReentrant {
         PerpsTypes.Market storage m = _market(marketId);
         if (m.paused) revert MarketIsPaused();
         if (amount == 0) revert ZeroAmount();
+        if (balances[msg.sender][marketId].position == 0) revert NoPosition();
         PerpsTypes.FundingIndex memory index = _advanceFundingIndex(marketId);
         _settleAccountFunding(msg.sender, marketId, index);
         vault.adjustUserBalance(msg.sender, marketId, -int256(amount));
@@ -514,10 +517,8 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
             _consumeFill(makerOrder, s.makerSignatures[i], fill.amount);
             takerFilled += fill.amount;
 
-            (uint256 makerFee, uint256 makerMarginIn) =
-                _prepareSide(makerOrder, fill.amount, fill.priceX18, false);
-            (uint256 takerFee, uint256 takerMarginIn) =
-                _prepareSide(takerOrder, fill.amount, fill.priceX18, true);
+            (uint256 makerFee, uint256 makerMarginIn) = _prepareSide(makerOrder, fill.amount, fill.priceX18, false);
+            (uint256 takerFee, uint256 takerMarginIn) = _prepareSide(takerOrder, fill.amount, fill.priceX18, true);
 
             // Credit pulled collateral in memory, then apply fill + fees in one storage write.
             PerpsTypes.Balance memory makerBal = balances[makerOrder.trader][marketId];
@@ -673,6 +674,7 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         uint256 amount = uint256(b.margin);
         b.margin = 0;
         vault.adjustUserBalance(user, marketId, int256(amount));
+        emit MarginSettled(user, marketId, int256(amount));
     }
 
     function _verifyOrder(PerpsTypes.Order calldata order, bytes calldata signature)
