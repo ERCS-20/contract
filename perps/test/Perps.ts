@@ -298,6 +298,63 @@ describe("PerpsExchange", async function () {
     assert.ok((await vault.read.balances([maker.account.address])) > 0n);
   });
 
+  it("closing flat with negative margin reverts InsufficientMargin", async function () {
+    const ctx = await deployPerpsSystem();
+    const { viem, publicClient, chainId, maker, taker, operator, exchange, MARKET_ID, PRICE } = ctx;
+
+    const amount = 1n * COL;
+    const orderMargin = 50n * COL;
+    await fundAndDeposit(ctx, maker, 500n * COL);
+    await fundAndDeposit(ctx, taker, 500n * COL);
+
+    const exchangeAsOp = await viem.getContractAt("PerpsExchange", exchange.address, {
+      client: { public: publicClient, wallet: operator },
+    });
+    await settleOne(ctx, exchangeAsOp, maker, taker, amount, orderMargin, 1n, 1n);
+
+    // Short covers at a loss: leftover margin is negative when position hits 0.
+    const closePrice = 160n * COL;
+    const expiry = BigInt(Math.floor(Date.now() / 1000) + 3600);
+    const closeMaker = {
+      trader: maker.account.address as Address,
+      marketId: MARKET_ID,
+      amount,
+      margin: 0n,
+      priceX18: closePrice,
+      isBuy: true,
+      nonce: 2n,
+      expiry,
+    };
+    const closeTaker = {
+      trader: taker.account.address as Address,
+      marketId: MARKET_ID,
+      amount,
+      margin: 0n,
+      priceX18: closePrice,
+      isBuy: false,
+      nonce: 2n,
+      expiry,
+    };
+    const closeMakerSig = await signPerpsOrder(maker, chainId, exchange.address, closeMaker);
+    const closeTakerSig = await signPerpsOrder(taker, chainId, exchange.address, closeTaker);
+
+    await viem.assertions.revertWithCustomError(
+      exchangeAsOp.write.settleTrades([
+        [
+          {
+            takerOrder: closeTaker,
+            takerSignature: closeTakerSig,
+            makerOrders: [closeMaker],
+            makerSignatures: [closeMakerSig],
+            fulfillments: [{ amount, priceX18: closePrice }],
+          },
+        ],
+      ]),
+      exchange,
+      "InsufficientMargin",
+    );
+  });
+
   it("session signer can sign orders for trader", async function () {
     const ctx = await deployPerpsSystem();
     const {
