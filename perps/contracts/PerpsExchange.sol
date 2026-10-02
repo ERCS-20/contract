@@ -67,6 +67,7 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     event MarketCreated(uint256 indexed marketId, address indexed ercs20, uint256 adlEquityThreshold, uint256 minCollateralX18);
     event MarketPaused(uint256 indexed marketId, bool paused);
     event AdlThresholdSet(uint256 indexed marketId, uint256 threshold);
+    event MinCollateralSet(uint256 indexed marketId, uint256 minCollateralX18);
     event OracleSet(address indexed oracle);
     event FunderSet(address indexed funder);
     event FundingIndexUpdated(uint256 indexed marketId, int256 value, uint256 timestamp);
@@ -295,6 +296,7 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         _requireMarket(marketId);
         if (minCollateralX18 < PerpsTypes.ONE_X18) revert InvalidMinCollateral();
         markets[marketId].minCollateralX18 = minCollateralX18;
+        emit MinCollateralSet(marketId, minCollateralX18);
     }
 
     function setMarketPaused(uint256 marketId, bool paused_) external onlyDAO {
@@ -570,6 +572,8 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     function _advanceFundingIndex(uint256 marketId) private returns (PerpsTypes.FundingIndex memory index) {
         index = fundingIndex[marketId];
 
+        // Bootstrap only: seed timestamp with value still 0. No funding accrued, so no FundingIndexUpdated.
+        // Normal markets are initialized in createMarket; this branch is a defensive fallback.
         if (index.timestamp == 0) {
             index.timestamp = block.timestamp;
             fundingIndex[marketId] = index;
@@ -609,7 +613,9 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
             b.margin += marginDelta;
         }
 
-        emit FundingSettled(account, marketId, marginDelta, localTimestamp, globalIndex.timestamp, globalIndex.value);
+        if (marginDelta != 0) {
+            emit FundingSettled(account, marketId, marginDelta, localTimestamp, globalIndex.timestamp, globalIndex.value);
+        }
     }
 
     /// @dev Opening/increasing size always pulls proportional `order.margin` from vault free (pot only).

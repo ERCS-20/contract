@@ -68,7 +68,6 @@ contract Ercs20TwapOracle is Ownable, IPerpsOracle, IOracleSampler {
 
     /// @inheritdoc IOracleSampler
     function update(uint256 marketId, address ercs20) external onlyExchange returns (bool updated) {
-        if (ercs20 == address(0)) revert ZeroAddress();
         MarketState storage m = _markets[marketId];
         if (m.lastSampleAt != 0 && block.timestamp < m.lastSampleAt + minSampleInterval) {
             return false;

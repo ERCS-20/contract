@@ -55,9 +55,6 @@ contract Ercs20FundingOracle is Ownable, IFundingOracle {
         onlyExchange
         returns (bool updated)
     {
-        if (lastPriceX18 == 0) revert InvalidPrice();
-        if (ercs20 == address(0)) revert ZeroAddress();
-
         MarketState storage m = markets[marketId];
         if (m.lastSampleAt != 0 && block.timestamp < m.lastSampleAt + minSampleInterval) {
             return false;
