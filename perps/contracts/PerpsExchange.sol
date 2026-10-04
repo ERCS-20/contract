@@ -488,72 +488,72 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
             revert InvalidFill();
         }
 
-        PerpsTypes.Order calldata takerOrder = s.takerOrder;
-        uint256 marketId = takerOrder.marketId;
+        uint256 marketId = s.takerOrder.marketId;
+        _settleAccountFunding(s.takerOrder.trader, marketId, _advanceFundingIndex(marketId));
 
-        PerpsTypes.FundingIndex memory index = _advanceFundingIndex(marketId);
-        _settleAccountFunding(takerOrder.trader, marketId, index);
-
-        bytes32 takerHash = _verifyOrder(takerOrder, s.takerSignature);
+        bytes32 takerHash = _verifyOrder(s.takerOrder, s.takerSignature);
         uint256 takerFilled = filledAmount[takerHash];
 
         for (uint256 i; i < length;) {
-            PerpsTypes.Order calldata makerOrder = s.makerOrders[i];
-            PerpsTypes.Fulfillment calldata fill = s.fulfillments[i];
-
-            if (fill.amount == 0 || fill.priceX18 == 0) revert InvalidFill();
-            if (makerOrder.marketId != takerOrder.marketId) revert OrderMismatch();
-            if (makerOrder.isBuy == takerOrder.isBuy) revert OrderMismatch();
-
-            _requireLimitPrice(makerOrder, fill.priceX18);
-            _requireLimitPrice(takerOrder, fill.priceX18);
-
-            _settleAccountFunding(makerOrder.trader, marketId, index);
-
-            _consumeFill(makerOrder, s.makerSignatures[i], fill.amount);
-            takerFilled += fill.amount;
-
-            (uint256 makerFee, uint256 makerMarginIn) = _prepareSide(makerOrder, fill.amount, fill.priceX18, false);
-            (uint256 takerFee, uint256 takerMarginIn) = _prepareSide(takerOrder, fill.amount, fill.priceX18, true);
-
-            // Credit pulled collateral in memory, then apply fill + fees in one storage write.
-            PerpsTypes.Balance memory makerBal = balances[makerOrder.trader][marketId];
-            PerpsTypes.Balance memory takerBal = balances[takerOrder.trader][marketId];
-            makerBal.margin += int256(makerMarginIn);
-            takerBal.margin += int256(takerMarginIn);
-
-            (PerpsTypes.Balance memory newTaker, PerpsTypes.Balance memory newMaker) =
-                PerpsMath.applyTrade(takerBal, makerBal, fill.amount, fill.priceX18, takerOrder.isBuy);
-
-            newMaker.margin -= int256(makerFee);
-            newTaker.margin -= int256(takerFee);
-            _setBalance(makerOrder.trader, marketId, newMaker);
-            _setBalance(takerOrder.trader, marketId, newTaker);
-            vault.collectProtocolFee(marketId, makerFee + takerFee);
-
-            _tryReturnMarginToVault(makerOrder.trader, marketId);
-            _tryReturnMarginToVault(takerOrder.trader, marketId);
-
-            emit TradeSettled(
-                marketId,
-                makerOrder.trader,
-                takerOrder.trader,
-                fill.amount,
-                fill.priceX18,
-                makerMarginIn,
-                takerMarginIn,
-                makerFee,
-                takerFee
-            );
-
+            takerFilled += _settleFill(s.takerOrder, s.makerOrders[i], s.makerSignatures[i], s.fulfillments[i]);
             unchecked {
                 ++i;
             }
         }
 
-        if (takerFilled > takerOrder.amount) revert OrderOverfilled();
+        if (takerFilled > s.takerOrder.amount) revert OrderOverfilled();
         filledAmount[takerHash] = takerFilled;
         markets[marketId].lastPriceX18 = s.fulfillments[length - 1].priceX18;
+    }
+
+    function _settleFill(
+        PerpsTypes.Order calldata takerOrder,
+        PerpsTypes.Order calldata makerOrder,
+        bytes calldata makerSignature,
+        PerpsTypes.Fulfillment calldata fill
+    ) private returns (uint256) {
+        if (fill.amount == 0 || fill.priceX18 == 0) revert InvalidFill();
+        if (makerOrder.marketId != takerOrder.marketId) revert OrderMismatch();
+        if (makerOrder.isBuy == takerOrder.isBuy) revert OrderMismatch();
+
+        _requireLimitPrice(makerOrder, fill.priceX18);
+        _requireLimitPrice(takerOrder, fill.priceX18);
+
+        uint256 marketId = takerOrder.marketId;
+        _settleAccountFunding(makerOrder.trader, marketId, fundingIndex[marketId]);
+        _consumeFill(makerOrder, makerSignature, fill.amount);
+
+        (uint256 makerFee, uint256 makerMarginIn) = _prepareSide(makerOrder, fill.amount, fill.priceX18, false);
+        (uint256 takerFee, uint256 takerMarginIn) = _prepareSide(takerOrder, fill.amount, fill.priceX18, true);
+
+        PerpsTypes.Balance memory makerBal = balances[makerOrder.trader][marketId];
+        PerpsTypes.Balance memory takerBal = balances[takerOrder.trader][marketId];
+        makerBal.margin += int256(makerMarginIn);
+        takerBal.margin += int256(takerMarginIn);
+
+        (takerBal, makerBal) = PerpsMath.applyTrade(takerBal, makerBal, fill.amount, fill.priceX18, takerOrder.isBuy);
+
+        makerBal.margin -= int256(makerFee);
+        takerBal.margin -= int256(takerFee);
+        _setBalance(makerOrder.trader, marketId, makerBal);
+        _setBalance(takerOrder.trader, marketId, takerBal);
+        vault.collectProtocolFee(marketId, makerFee + takerFee);
+
+        emit TradeSettled(
+            marketId,
+            makerOrder.trader,
+            takerOrder.trader,
+            fill.amount,
+            fill.priceX18,
+            makerMarginIn,
+            takerMarginIn,
+            makerFee,
+            takerFee
+        );
+
+        _tryReturnMarginToVault(makerOrder.trader, marketId);
+        _tryReturnMarginToVault(takerOrder.trader, marketId);
+        return fill.amount;
     }
 
     function _sampleFunding(uint256 marketId, PerpsTypes.Market storage m) private {
