@@ -361,6 +361,29 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         emit MarginAdded(msg.sender, marketId, amount);
     }
 
+    /// @notice Move market Balance.margin back to vault free.
+    /// @dev Funding is settled first. If a position remains, it must stay collateralized at mark.
+    function withdrawMargin(uint256 marketId, uint256 amount) external nonReentrant {
+        PerpsTypes.Market storage m = _market(marketId);
+        if (m.paused) revert MarketIsPaused();
+
+        PerpsTypes.FundingIndex memory index = _advanceFundingIndex(marketId);
+        _settleAccountFunding(msg.sender, marketId, index);
+
+        PerpsTypes.Balance storage b = balances[msg.sender][marketId];
+        if (b.margin < int256(amount)) revert InsufficientMargin();
+        b.margin -= int256(amount);
+        if (b.position != 0) {
+            uint256 mark = IPerpsOracle(oracle).getPrice(marketId);
+            if (!PerpsMath.isCollateralized(b.margin, b.position, mark, m.minCollateralX18)) {
+                revert InsufficientMargin();
+            }
+        }
+
+        vault.adjustUserBalance(msg.sender, marketId, int256(amount));
+        emit MarginWithdraw(msg.sender, marketId, amount);
+    }
+
     /// @dev Caller must group by `marketId` (backend sorts fills by pairId). Each contiguous
     ///      run samples mark once before fills and funding once after that run's last fill.
     function settleTrades(PerpsTypes.TradeSettlement[] calldata settlements) external onlyOperator {

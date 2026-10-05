@@ -202,6 +202,50 @@ describe("PerpsExchange", async function () {
     assert.equal(marginAfter, marginBefore + 10n * COL);
   });
 
+  it("withdrawMargin returns collateral and rejects unsafe withdrawals", async function () {
+    const ctx = await deployPerpsSystem();
+    const { viem, publicClient, maker, taker, operator, exchange, vault, MARKET_ID } = ctx;
+
+    const exchangeAsTaker = await viem.getContractAt("PerpsExchange", exchange.address, {
+      client: { public: publicClient, wallet: taker },
+    });
+    await viem.assertions.revertWithCustomError(
+      exchangeAsTaker.write.withdrawMargin([MARKET_ID, 1n * COL]),
+      exchange,
+      "InsufficientMargin",
+    );
+
+    await fundAndDeposit(ctx, maker, 500n * COL);
+    await fundAndDeposit(ctx, taker, 500n * COL);
+    const exchangeAsOp = await viem.getContractAt("PerpsExchange", exchange.address, {
+      client: { public: publicClient, wallet: operator },
+    });
+    await settleOne(ctx, exchangeAsOp, maker, taker, 1n * COL, 200n * COL, 1n, 1n);
+
+    const [takerMargin] = await exchange.read.balances([taker.account.address, MARKET_ID]);
+    const takerFreeBefore = await vault.read.balances([taker.account.address]);
+    await exchangeAsTaker.write.withdrawMargin([MARKET_ID, 10n * COL]);
+    const [takerMarginAfter] = await exchange.read.balances([taker.account.address, MARKET_ID]);
+    assert.equal(takerMarginAfter, takerMargin - 10n * COL);
+    assert.equal(await vault.read.balances([taker.account.address]), takerFreeBefore + 10n * COL);
+
+    await viem.assertions.revertWithCustomError(
+      exchangeAsTaker.write.withdrawMargin([MARKET_ID, takerMarginAfter + 1n]),
+      exchange,
+      "InsufficientMargin",
+    );
+
+    const exchangeAsMaker = await viem.getContractAt("PerpsExchange", exchange.address, {
+      client: { public: publicClient, wallet: maker },
+    });
+    // Short opened @100 with ~300 margin; withdrawing 250 leaves ~50 vs 110% of 100 notional.
+    await viem.assertions.revertWithCustomError(
+      exchangeAsMaker.write.withdrawMargin([MARKET_ID, 250n * COL]),
+      exchange,
+      "InsufficientMargin",
+    );
+  });
+
   it("increasing position always pulls order.margin even if Balance.margin already covers want", async function () {
     const ctx = await deployPerpsSystem();
     const { viem, publicClient, maker, taker, operator, exchange, vault, MARKET_ID } = ctx;
