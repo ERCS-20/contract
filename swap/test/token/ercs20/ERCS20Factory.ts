@@ -99,6 +99,24 @@ describe("ERCS20Factory", function () {
         ).to.be.revertedWith("ERCS20Factory: SYMBOL_EXISTS");
     });
 
+    it("uppercases symbol and treats case variants as the same", async function () {
+        const { tokenOwner, factory } = await loadFixture(createFixture);
+
+        const tx = await factory.create("Mixed", "abc", totalSupply, usdcAmount, tokenOwner.address);
+        const receipt = await tx.wait();
+        expect(receipt).to.not.be.null;
+        const { tokenAddress } = getPairCreatedFromReceipt(receipt!);
+
+        const token = await ethers.getContractAt("ERCS20", tokenAddress);
+        expect(await token.symbol()).to.equal("ABC");
+        expect(await factory.symbols("ABC")).to.equal(tokenAddress);
+        expect(await factory.symbols("abc")).to.equal(ethers.ZeroAddress);
+
+        await expect(
+            factory.create("Again", "AbC", totalSupply, usdcAmount, tokenOwner.address)
+        ).to.be.revertedWith("ERCS20Factory: SYMBOL_EXISTS");
+    });
+
     it("pause blocks create; unpause allows create", async function () {
         const { tokenOwner, other, factory } = await loadFixture(createFixture);
 

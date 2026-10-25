@@ -32,12 +32,12 @@ contract ERCS20Factory is Pausable, Ownable {
 
     /// @notice Deploys a new ERCS20 token contract and transfers its ownership.
     /// @param name ERC20 name for the new token.
-    /// @param symbol ERC20 symbol for the new token.
+    /// @param symbol ERC20 symbol for the new token (ASCII a-z normalized to uppercase for uniqueness and on-chain symbol).
     /// @param totalSupply Initial token supply minted to the ERCS20 contract itself.
     /// @param usdcAmount Initial quote-side reserve seed (USDC-chain native asset side in implementation).
     /// @param newOwner Address that receives ownership of the new ERCS20 contract.
     function create(string memory name, string memory symbol, uint256 totalSupply, uint256 usdcAmount, address newOwner) external whenNotPaused {
-
+        symbol = _toUpper(symbol);
         require(symbols[symbol] == address(0), "ERCS20Factory: SYMBOL_EXISTS");
 
         ERCS20 ercs20 = new ERCS20(name, symbol, totalSupply, usdcAmount);
@@ -46,6 +46,18 @@ contract ERCS20Factory is Pausable, Ownable {
         ercs20s[address(ercs20)] = true;
 
         emit PairCreated(address(ercs20), address(0xFFfFfFffFFfffFFfFFfFFFFFffFFFffffFfFFFfF), address(ercs20), index++);
+    }
+
+    /// @dev Uppercases ASCII letters a-z only; other bytes unchanged.
+    function _toUpper(string memory s) private pure returns (string memory) {
+        bytes memory b = bytes(s);
+        for (uint256 i = 0; i < b.length; ++i) {
+            uint8 c = uint8(b[i]);
+            if (c >= 0x61 && c <= 0x7a) {
+                b[i] = bytes1(c - 0x20);
+            }
+        }
+        return string(b);
     }
 
     /// @notice Pauses factory creation operations.
