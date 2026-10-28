@@ -175,6 +175,29 @@ describe("PerpsExchange", async function () {
     assert.equal(await vault.read.protocolFees(), makerFee + takerFee);
   });
 
+  it("settleTrades self-trade nets position and returns leftover margin", async function () {
+    const ctx = await deployPerpsSystem();
+    const { viem, publicClient, taker, operator, exchange, vault, MARKET_ID, PRICE } = ctx;
+
+    const amount = 2n * COL;
+    const orderMargin = 300n * COL;
+    const deposit = 1000n * COL;
+    await fundAndDeposit(ctx, taker, deposit);
+
+    const exchangeAsOp = await viem.getContractAt("PerpsExchange", exchange.address, {
+      client: { public: publicClient, wallet: operator },
+    });
+    // Same account as maker (sell) and taker (buy): storage alias nets to flat.
+    await settleOne(ctx, exchangeAsOp, taker, taker, amount, orderMargin, 1n, 2n);
+
+    const [margin, position] = await exchange.read.balances([taker.account.address, MARKET_ID]);
+    const { makerFee, takerFee } = tradeFees(amount, PRICE);
+    assert.equal(position, 0n);
+    assert.equal(margin, 0n);
+    assert.equal(await vault.read.balances([taker.account.address]), deposit - makerFee - takerFee);
+    assert.equal(await vault.read.protocolFees(), makerFee + takerFee);
+  });
+
   it("addMargin requires an open position", async function () {
     const ctx = await deployPerpsSystem();
     const { viem, publicClient, maker, taker, operator, exchange, MARKET_ID } = ctx;

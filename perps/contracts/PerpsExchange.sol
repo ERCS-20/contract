@@ -549,17 +549,10 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         (uint256 makerFee, uint256 makerMarginIn) = _prepareSide(makerOrder, fill.amount, fill.priceX18, false);
         (uint256 takerFee, uint256 takerMarginIn) = _prepareSide(takerOrder, fill.amount, fill.priceX18, true);
 
-        PerpsTypes.Balance memory makerBal = balances[makerOrder.trader][marketId];
-        PerpsTypes.Balance memory takerBal = balances[takerOrder.trader][marketId];
-        makerBal.margin += int256(makerMarginIn);
-        takerBal.margin += int256(takerMarginIn);
-
-        (takerBal, makerBal) = PerpsMath.applyTrade(takerBal, makerBal, fill.amount, fill.priceX18, takerOrder.isBuy);
-
-        makerBal.margin -= int256(makerFee);
-        takerBal.margin -= int256(takerFee);
-        _setBalance(makerOrder.trader, marketId, makerBal);
-        _setBalance(takerOrder.trader, marketId, takerBal);
+        // Storage in-place, maker then taker. Same trader aliases one slot so self-trades net
+        // correctly (memory copies + double _setBalance would let the second write clobber the first).
+        _applyFillSide(makerOrder.trader, marketId, fill.amount, fill.priceX18, makerOrder.isBuy, makerMarginIn, makerFee);
+        _applyFillSide(takerOrder.trader, marketId, fill.amount, fill.priceX18, takerOrder.isBuy, takerMarginIn, takerFee);
         vault.collectProtocolFee(marketId, makerFee + takerFee);
 
         emit TradeSettled(
@@ -641,10 +634,37 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         }
     }
 
+    /// @dev Credit `marginIn`, apply fill delta, debit `fee` on one side. Uses storage so a
+    ///      maker==taker self-trade aliases and nets instead of clobbering via memory copies.
+    function _applyFillSide(
+        address account,
+        uint256 marketId,
+        uint256 amount,
+        uint256 priceX18,
+        bool isBuy,
+        uint256 marginIn,
+        uint256 fee
+    ) private {
+        PerpsTypes.Balance storage bal = balances[account][marketId];
+        bal.margin += int256(marginIn);
+
+        int256 posAmt = int256(amount);
+        int256 quoteAmt = int256((amount * priceX18) / PerpsTypes.ONE_X18);
+        if (isBuy) {
+            bal.position += posAmt;
+            bal.margin -= quoteAmt;
+        } else {
+            bal.position -= posAmt;
+            bal.margin += quoteAmt;
+        }
+
+        bal.margin -= int256(fee);
+    }
+
     /// @dev Opening/increasing size always pulls proportional `order.margin` from vault free (pot only).
     ///      Balance.margin is credited later in the same settle writeback as the fill.
     ///      Pure reduce pulls nothing (fee is debited from existing margin afterward).
-    ///      Buys do not prefund full notional — signed margin may go negative after `applyTrade`.
+    ///      Buys do not prefund full notional — signed margin may go negative after the fill delta.
     /// @return fee Trading fee for this fill.
     /// @return want Collateral pulled this fill (`0` on pure reduce).
     function _prepareSide(
