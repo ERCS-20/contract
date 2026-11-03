@@ -10,11 +10,12 @@ import {IErcs20Reserves} from "../interfaces/IErcs20Reserves.sol";
 /// @title Ercs20TwapOracle
 /// @notice Multi-market mark price = TWAP of each market's ERCS20 spot mid over `window`.
 /// @dev Samples via `update(marketId, ercs20)` from PerpsExchange. Spot address is not stored here.
+///      Mark is settled inside `update` (1s cadence, 30s window). `getPrice` returns that stored value.
 contract Ercs20TwapOracle is Ownable, IPerpsOracle, IOracleSampler {
     uint256 public constant BASE = 1e18;
     uint256 internal constant CARDINALITY = 32;
-    uint256 public constant WINDOW = 15 minutes;
-    uint256 public constant MIN_SAMPLE_INTERVAL = 30;
+    uint256 public constant WINDOW = 30 seconds;
+    uint256 public constant MIN_SAMPLE_INTERVAL = 1;
 
     struct Observation {
         uint32 timestamp;
@@ -24,6 +25,8 @@ contract Ercs20TwapOracle is Ownable, IPerpsOracle, IOracleSampler {
     struct MarketState {
         uint256 priceCumulative;
         uint256 lastMidX18;
+        /// @notice TWAP settled at the last successful sample. Does not move until the next `update`.
+        uint256 markX18;
         uint256 lastSampleAt;
         uint8 observationIndex;
         uint8 observationCount;
@@ -31,16 +34,14 @@ contract Ercs20TwapOracle is Ownable, IPerpsOracle, IOracleSampler {
     }
 
     address public immutable exchange;
-    /// @notice TWAP window (default 15 minutes).
+    /// @notice TWAP window (default 30 seconds).
     uint256 public immutable window;
-    /// @notice Minimum seconds between samples (default 30).
+    /// @notice Minimum seconds between samples (default 1).
     uint256 public immutable minSampleInterval;
 
     mapping(uint256 => MarketState) internal _markets;
 
-    event MarkSampled(
-        uint256 indexed marketId, uint256 spotX18, uint256 priceCumulative, uint256 timestamp
-    );
+    event MarkSampled(uint256 indexed marketId, uint256 markX18, uint256 timestamp);
 
     error NotExchange();
     error ZeroAddress();
@@ -84,8 +85,9 @@ contract Ercs20TwapOracle is Ownable, IPerpsOracle, IOracleSampler {
         m.lastMidX18 = spotX18;
         m.lastSampleAt = block.timestamp;
         _writeObservation(m, now32, uint224(m.priceCumulative));
+        m.markX18 = _twap(m);
 
-        emit MarkSampled(marketId, spotX18, m.priceCumulative, block.timestamp);
+        emit MarkSampled(marketId, m.markX18, block.timestamp);
         return true;
     }
 
@@ -93,10 +95,14 @@ contract Ercs20TwapOracle is Ownable, IPerpsOracle, IOracleSampler {
     function getPrice(uint256 marketId) external view returns (uint256 priceX18) {
         MarketState storage m = _markets[marketId];
         if (m.observationCount == 0 || m.lastSampleAt == 0) revert NotReady();
+        return m.markX18;
+    }
 
+    /// @dev TWAP ending at this sample. `lastSampleAt == block.timestamp`, so the latest mid has
+    ///      not accrued yet; it enters the average on the next sample.
+    function _twap(MarketState storage m) private view returns (uint256) {
         uint256 nowTs = block.timestamp;
         uint256 virtCum = m.priceCumulative + m.lastMidX18 * (nowTs - m.lastSampleAt);
-
         uint256 target = nowTs > window ? nowTs - window : 0;
         (uint32 obsTime, uint224 obsCum) = _observe(m, target);
         uint256 dt = nowTs - uint256(obsTime);

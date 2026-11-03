@@ -10,15 +10,15 @@ import {IErcs20Reserves} from "../interfaces/IErcs20Reserves.sol";
 /// @notice Multi-market funding oracle: last vs ERCS20 spot mid, per-market cached rate.
 /// @dev
 ///  premiumX18 = (last − spot) / spot
-///  rate8h     = clamp(premium, ±0.75%)
-///  rate/sec   = |rate8h| / 8 hours
+///  rate1h     = clamp(premium, ±0.75% / 8)
+///  rate/sec   = |rate1h| / 1 hour
 ///  Spot `ercs20` is passed by PerpsExchange each `update` (not stored here).
 contract Ercs20FundingOracle is Ownable, IFundingOracle {
     uint256 public constant BASE = 1e18;
-    uint256 public constant EIGHT_HOURS = 8 hours;
-    /// @notice Max absolute funding over an 8-hour window: 0.75%.
-    uint256 public constant MAX_ABS_RATE_8H_X18 = (BASE * 75) / 10_000;
-    uint256 public constant MIN_SAMPLE_INTERVAL = 5 minutes;
+    uint256 public constant ONE_HOUR = 1 hours;
+    /// @notice Max absolute funding over a 1-hour window: 0.75% / 8.
+    uint256 public constant MAX_ABS_RATE_1H_X18 = ((BASE * 75) / 10_000) / 8;
+    uint256 public constant MIN_SAMPLE_INTERVAL = 1 hours;
 
     struct MarketState {
         bool isPositive;
@@ -27,12 +27,12 @@ contract Ercs20FundingOracle is Ownable, IFundingOracle {
     }
 
     address public immutable exchange;
-    /// @notice Minimum seconds between successful samples (default 5 minutes).
+    /// @notice Minimum seconds between successful samples (default 1 hour).
     uint256 public immutable minSampleInterval;
 
     mapping(uint256 => MarketState) public markets;
 
-    event FundingRateSampled(uint256 indexed marketId, uint256 lastPriceX18, uint256 spotX18, int256 premiumX18,bool positive, uint256 ratePerSecondX18);
+    event FundingRateSampled(uint256 indexed marketId, bool positive, uint256 ratePerSecondX18, uint256 timestamp);
 
     error NotExchange();
     error ZeroAddress();
@@ -65,19 +65,19 @@ contract Ercs20FundingOracle is Ownable, IFundingOracle {
 
         int256 premiumX18 = ((int256(lastPriceX18) - int256(spotX18)) * int256(BASE)) / int256(spotX18);
 
-        int256 max8h = int256(MAX_ABS_RATE_8H_X18);
-        if (premiumX18 > max8h) premiumX18 = max8h;
-        else if (premiumX18 < -max8h) premiumX18 = -max8h;
+        int256 max1h = int256(MAX_ABS_RATE_1H_X18);
+        if (premiumX18 > max1h) premiumX18 = max1h;
+        else if (premiumX18 < -max1h) premiumX18 = -max1h;
 
         bool positive = premiumX18 >= 0;
-        uint256 abs8h = positive ? uint256(premiumX18) : uint256(-premiumX18);
-        uint256 ratePerSec = abs8h / EIGHT_HOURS;
+        uint256 abs1h = positive ? uint256(premiumX18) : uint256(-premiumX18);
+        uint256 ratePerSec = abs1h / ONE_HOUR;
 
         m.isPositive = positive;
         m.ratePerSecondX18 = ratePerSec;
         m.lastSampleAt = block.timestamp;
 
-        emit FundingRateSampled(marketId, lastPriceX18, spotX18, premiumX18, positive, ratePerSec);
+        emit FundingRateSampled(marketId, positive, ratePerSec, block.timestamp);
         return true;
     }
 

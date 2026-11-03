@@ -72,8 +72,6 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     event FunderSet(address indexed funder);
     event FundingIndexUpdated(uint256 indexed marketId, int256 value, uint256 timestamp);
     event FundingSettled(address indexed account, uint256 indexed marketId, int256 marginDelta, uint256 startTimestamp, uint256 endTimestamp, int256 value);
-    event FundingSampled(uint256 indexed marketId, uint256 lastPriceX18, bool updated);
-    event MarkSampled(uint256 indexed marketId, bool updated);
     /// @notice `makerMarginIn` / `takerMarginIn` = collateral pulled this fill (0 on pure reduce).
     ///         `makerMargin` / `makerPosition` / `taker*` = current Balance after fill, fees, and flat auto-return.
     event TradeSettled(uint256 indexed marketId, address indexed maker, address indexed taker, uint256 amount, uint256 priceX18, uint256 makerMarginIn, uint256 takerMarginIn, uint256 makerFee, uint256 takerFee);
@@ -574,14 +572,12 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
 
     function _sampleFunding(uint256 marketId, PerpsTypes.Market storage m) private {
         if (m.lastPriceX18 == 0) return;
-        bool updated = IFundingOracle(funder).update(marketId, m.lastPriceX18, m.ercs20);
-        emit FundingSampled(marketId, m.lastPriceX18, updated);
+        IFundingOracle(funder).update(marketId, m.lastPriceX18, m.ercs20);
     }
 
     /// @dev TWAP sampler. Oracle must implement `IOracleSampler.update`.
     function _sampleMark(uint256 marketId) private {
-        bool updated = IOracleSampler(oracle).update(marketId, markets[marketId].ercs20);
-        emit MarkSampled(marketId, updated);
+        IOracleSampler(oracle).update(marketId, markets[marketId].ercs20);
     }
 
     /// @dev Advance continuous funding index: Δindex += ±(unitlessFunding * mark / 1e18).

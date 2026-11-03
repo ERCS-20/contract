@@ -4,8 +4,8 @@ import { describe, it } from "node:test";
 import { network } from "hardhat";
 
 const COL = 10n ** 18n;
-const MAX_8H = (COL * 75n) / 10_000n; // 0.75%
-const EIGHT_HOURS = 8n * 3600n;
+const MAX_1H = (COL * 75n) / 10_000n / 8n; // 0.75% / 8 per hour
+const ONE_HOUR = 3600n;
 const MARKET_ID = 1n;
 
 describe("Ercs20FundingOracle", async function () {
@@ -26,18 +26,18 @@ describe("Ercs20FundingOracle", async function () {
     return { viem, networkHelpers, publicClient, exchange, spot, funder, funderAsExchange };
   }
 
-  it("samples premium from last vs spot and clamps to 0.75%/8h", async function () {
+  it("samples premium from last vs spot and clamps to 0.75%/8 per hour", async function () {
     const { funder, funderAsExchange, spot } = await deploy();
 
     await funderAsExchange.write.update([MARKET_ID, 110n * COL, spot.address]);
-    const ratePerSec = MAX_8H / EIGHT_HOURS;
+    const ratePerSec = MAX_1H / ONE_HOUR;
     const m = await funder.read.markets([MARKET_ID]);
     assert.equal(m[0], true); // isPositive
     assert.equal(m[1], ratePerSec);
 
-    const [positive, value] = await funder.read.getFunding([MARKET_ID, EIGHT_HOURS]);
+    const [positive, value] = await funder.read.getFunding([MARKET_ID, ONE_HOUR]);
     assert.equal(positive, true);
-    assert.equal(value, ratePerSec * EIGHT_HOURS);
+    assert.equal(value, ratePerSec * ONE_HOUR);
   });
 
   it("negative premium: shorts pay longs", async function () {
@@ -46,17 +46,17 @@ describe("Ercs20FundingOracle", async function () {
     await funderAsExchange.write.update([MARKET_ID, 90n * COL, spot.address]);
     const m = await funder.read.markets([MARKET_ID]);
     assert.equal(m[0], false);
-    assert.equal(m[1], MAX_8H / EIGHT_HOURS);
+    assert.equal(m[1], MAX_1H / ONE_HOUR);
   });
 
-  it("respects 5 minute sample interval", async function () {
+  it("respects 1 hour sample interval", async function () {
     const { networkHelpers, funder, funderAsExchange, spot } = await deploy();
 
     await funderAsExchange.write.update([MARKET_ID, 101n * COL, spot.address]);
     await funderAsExchange.write.update([MARKET_ID, 120n * COL, spot.address]);
-    assert.equal((await funder.read.markets([MARKET_ID]))[1], MAX_8H / EIGHT_HOURS);
+    assert.equal((await funder.read.markets([MARKET_ID]))[1], MAX_1H / ONE_HOUR);
 
-    await networkHelpers.time.increase(5 * 60);
+    await networkHelpers.time.increase(60 * 60);
     await funderAsExchange.write.update([MARKET_ID, 100n * COL, spot.address]);
     assert.equal((await funder.read.markets([MARKET_ID]))[1], 0n);
   });
