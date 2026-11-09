@@ -226,11 +226,9 @@ contract GlobalPerpsVault is Ownable, Pausable, ReentrancyGuard {
         emit ProtocolFeeCollected(marketId, amount);
     }
 
-    /// @notice Claim accumulated protocol fees to `claimFeeDAO`.
-    function claimFees() external onlyClaimFeeDAO nonReentrant {
-        uint256 amount = protocolFees;
-        if (amount == 0) return;
-        protocolFees = 0;
+    /// @notice Claim `amount` of accumulated protocol fees to `claimFeeDAO`.
+    function claimFees(uint256 amount) external onlyClaimFeeDAO nonReentrant {
+        protocolFees -= amount;
         _payout(msg.sender, amount);
         emit FeesClaimed(msg.sender, amount);
     }

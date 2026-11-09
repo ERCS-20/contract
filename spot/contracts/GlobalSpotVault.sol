@@ -347,12 +347,10 @@ contract GlobalSpotVault is Ownable, Pausable, ReentrancyGuard {
         emit InternalTransfer(from, to, token, amount, fee);
     }
 
-    /// @notice Claims accumulated protocol fees for a given token to `claimFeeDAO`.
+    /// @notice Claims `amount` of accumulated protocol fees for `token` to `claimFeeDAO`.
     /// @dev Callable only by `claimFeeDAO` (configured by `owner` via `setClaimFeeDAO`).
-    function claimFees(address token) external onlyClaimFeeDAO nonReentrant {
-        uint256 amount = tokenFees[token];
-        if (amount == 0) return;
-        tokenFees[token] = 0;
+    function claimFees(address token, uint256 amount) external onlyClaimFeeDAO nonReentrant {
+        tokenFees[token] -= amount;
         _payout(token, msg.sender, amount);
     }
 

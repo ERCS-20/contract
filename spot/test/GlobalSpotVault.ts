@@ -253,7 +253,9 @@ describe("GlobalSpotVault", async function () {
     const vaultAsClaimFeeDao = await viem.getContractAt("GlobalSpotVault", vault.address, {
       client: { public: publicClient, wallet: claimFeeDao },
     });
-    await vaultAsClaimFeeDao.write.claimFees([tokenA.address]);
+    await vaultAsClaimFeeDao.write.claimFees([tokenA.address, 10n]);
+    assert.equal(await vault.read.tokenFees([tokenA.address]), 15n);
+    await vaultAsClaimFeeDao.write.claimFees([tokenA.address, 15n]);
     const claimFeeDaoAfter = await tokenA.read.balanceOf([claimFeeDao.account.address]);
     assert.equal(claimFeeDaoAfter - claimFeeDaoBefore, 25n);
     assert.equal(await vault.read.tokenFees([tokenA.address]), 0n);
@@ -286,7 +288,7 @@ describe("GlobalSpotVault", async function () {
     await testClient.stopImpersonatingAccount({ address: ctx.exchange.address });
 
     await viem.assertions.revertWithCustomError(
-      vault.write.claimFees([tokenA.address]),
+      vault.write.claimFees([tokenA.address, 10n]),
       vault,
       "NotClaimFeeDAO",
     );
