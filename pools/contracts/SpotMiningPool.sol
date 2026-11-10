@@ -2,6 +2,7 @@
 pragma solidity 0.8.34;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
@@ -30,19 +31,33 @@ contract SpotMiningPool is Ownable, ReentrancyGuard {
 
     address public operator;
     address public withdrawer;
+    /// @notice Set when the pool is abandoned. Stake, unstake, and claim stop. Users call `withdrawStake`.
+    bool public paused;
 
     /// @notice System half already pulled into this contract, keyed by reward token. WUSDC uses `systemNative`.
     mapping(address => uint256) public systemReserve;
     uint256 public systemNative;
 
     mapping(address => RewardBucket.Bucket) internal _buckets;
+    mapping(address => bool) internal _poolCreated;
 
+    event PoolCreated(
+        address indexed pool,
+        address indexed rewardToken,
+        string symbol,
+        string name,
+        uint8 decimals,
+        uint256 vaultFees
+    );
     event OperatorSet(address indexed operator);
     event WithdrawerSet(address indexed withdrawer);
+    event Paused(address indexed account);
+    event Unpaused(address indexed account);
     event MiningEnabledSet(address indexed rewardToken, bool enabled);
     event Staked(address indexed user, address indexed rewardToken, uint256 amount, uint256 userHalf);
     event Unstaked(address indexed user, address indexed rewardToken, uint256 amount, uint256 userHalf);
     event Claimed(address indexed user, address indexed rewardToken, uint256 userHalf);
+    event StakeWithdrawn(address indexed user, address indexed rewardToken, uint256 amount);
     event SystemWithdrawn(address indexed to, address indexed rewardToken, uint256 amount);
     event Rescued(address indexed token, address indexed to, uint256 amount);
 
@@ -52,6 +67,8 @@ contract SpotMiningPool is Ownable, ReentrancyGuard {
     error PayFailed();
     error StakeToken();
     error ExcessRescue();
+    error IsPaused();
+    error NotPaused();
 
     modifier onlyOperator() {
         if (msg.sender != operator) revert NotOperator();
@@ -60,6 +77,16 @@ contract SpotMiningPool is Ownable, ReentrancyGuard {
 
     modifier onlyWithdrawer() {
         if (msg.sender != withdrawer) revert NotWithdrawer();
+        _;
+    }
+
+    modifier whenNotPaused() {
+        if (paused) revert IsPaused();
+        _;
+    }
+
+    modifier whenPaused() {
+        if (!paused) revert NotPaused();
         _;
     }
 
@@ -82,10 +109,28 @@ contract SpotMiningPool is Ownable, ReentrancyGuard {
         emit WithdrawerSet(withdrawer_);
     }
 
+    function pause() external onlyOperator {
+        if (paused) revert IsPaused();
+        paused = true;
+        emit Paused(msg.sender);
+    }
+
+    function unpause() external onlyOperator {
+        if (!paused) revert NotPaused();
+        paused = false;
+        emit Unpaused(msg.sender);
+    }
+
     /// @notice Turn mining on or off for `rewardToken`. Staking is allowed either way.
     /// @dev Enabling credits fees already sitting in the vault to current stakers.
-    function setMiningEnabled(address rewardToken, bool enabled) external onlyOperator {
-        RewardBucket.setEnabled(_buckets[rewardToken], enabled, vault.tokenFees(rewardToken));
+    function setMiningEnabled(address rewardToken, bool enabled) external onlyOperator whenNotPaused {
+        uint256 fees = vault.tokenFees(rewardToken);
+        if (!_poolCreated[rewardToken]) {
+            _poolCreated[rewardToken] = true;
+            IERC20Metadata token = IERC20Metadata(rewardToken);
+            emit PoolCreated(address(this), rewardToken, token.symbol(), token.name(), token.decimals(), fees);
+        }
+        RewardBucket.setEnabled(_buckets[rewardToken], enabled, fees);
         emit MiningEnabledSet(rewardToken, enabled);
     }
 
@@ -112,23 +157,31 @@ contract SpotMiningPool is Ownable, ReentrancyGuard {
         return RewardBucket.earned(_buckets[rewardToken], user, vault.tokenFees(rewardToken));
     }
 
-    function stake(address rewardToken, uint256 amount) external nonReentrant {
+    function stake(address rewardToken, uint256 amount) external whenNotPaused nonReentrant {
         uint256 userHalf = RewardBucket.stake(_buckets[rewardToken], msg.sender, amount, vault.tokenFees(rewardToken));
         stakeToken.safeTransferFrom(msg.sender, address(this), amount);
         _payReward(rewardToken, userHalf);
         emit Staked(msg.sender, rewardToken, amount, userHalf);
     }
 
-    function unstake(address rewardToken, uint256 amount) external nonReentrant {
+    function unstake(address rewardToken, uint256 amount) external whenNotPaused nonReentrant {
         uint256 userHalf = RewardBucket.unstake(_buckets[rewardToken], msg.sender, amount, vault.tokenFees(rewardToken));
         stakeToken.safeTransfer(msg.sender, amount);
         _payReward(rewardToken, userHalf);
         emit Unstaked(msg.sender, rewardToken, amount, userHalf);
     }
 
-    function claim(address rewardToken) external nonReentrant {
+    function claim(address rewardToken) external whenNotPaused nonReentrant {
         uint256 userHalf = RewardBucket.harvest(_buckets[rewardToken], msg.sender, vault.tokenFees(rewardToken));
         _payReward(rewardToken, userHalf);
+    }
+
+    /// @notice Return this user's staked OBX for `rewardToken` after the pool is paused.
+    /// @dev Zeroes only that user's record so it cannot be taken twice. Rewards and bucket totals stay untouched.
+    function withdrawStake(address rewardToken) external whenPaused nonReentrant {
+        uint256 amount = RewardBucket.withdrawStake(_buckets[rewardToken], msg.sender);
+        if (amount != 0) stakeToken.safeTransfer(msg.sender, amount);
+        emit StakeWithdrawn(msg.sender, rewardToken, amount);
     }
 
     /// @notice Withdraw system half already left in this contract by user claims.

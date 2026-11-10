@@ -90,6 +90,14 @@ library RewardBucket {
         b.allocated += share * b.totalStaked / ONE;
     }
 
+    /// @notice Clear this user's stake so it can be returned once. Bucket totals stay as they are.
+    function withdrawStake(Bucket storage b, address account) internal returns (uint256 amount) {
+        UserInfo storage u = b.users[account];
+        amount = u.staked;
+        u.staked = 0;
+        u.debt = 0;
+    }
+
     /// @dev Move this user's unpaid user-half out of `allocated` and bring `debt` up to date.
     function _take(Bucket storage b, address account) private returns (uint256 delta) {
         UserInfo storage u = b.users[account];

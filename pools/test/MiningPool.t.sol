@@ -2,6 +2,7 @@
 pragma solidity 0.8.34;
 
 import {Test} from "forge-std/Test.sol";
+import {Vm} from "forge-std/Vm.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 import {SpotMiningPool} from "../contracts/SpotMiningPool.sol";
@@ -94,6 +95,7 @@ contract MiningPoolTest is Test {
         perpsVault = new MockPerpsVault();
         perps = new PerpsMiningPool(address(obx), address(perpsVault));
         perpsVault.setPool(address(perps));
+        perps.setOperator(operator);
         perps.setWithdrawer(withdrawer);
 
         obx.mint(alice, 1_000 ether);
@@ -104,6 +106,50 @@ contract MiningPoolTest is Test {
         obx.approve(address(perps), type(uint256).max);
         vm.prank(bob);
         obx.approve(address(spot), type(uint256).max);
+    }
+
+    function test_poolCreatedReadsTokenMetadataAndVaultFeesOnce() public {
+        reward.mint(address(this), 200 ether);
+        reward.approve(address(spotVault), 200 ether);
+        spotVault.addFees(address(reward), 200 ether);
+
+        vm.expectEmit(true, true, false, true, address(spot));
+        emit SpotMiningPool.PoolCreated(address(spot), address(reward), "OBX", "OBX", 18, 200 ether);
+        vm.prank(operator);
+        spot.setMiningEnabled(address(reward), true);
+
+        vm.recordLogs();
+        vm.prank(operator);
+        spot.setMiningEnabled(address(reward), false);
+        Vm.Log[] memory entries = vm.getRecordedLogs();
+        bytes32 createdTopic = keccak256("PoolCreated(address,address,string,string,uint8,uint256)");
+        uint256 created;
+        for (uint256 i = 0; i < entries.length; i++) {
+            if (entries[i].topics[0] == createdTopic) created++;
+        }
+        assertEq(created, 0);
+
+        vm.deal(address(this), 50 ether);
+        perpsVault.addFees{value: 50 ether}();
+        vm.recordLogs();
+        PerpsMiningPool createdPool = new PerpsMiningPool(address(obx), address(perpsVault));
+        entries = vm.getRecordedLogs();
+        bool found;
+        for (uint256 i = 0; i < entries.length; i++) {
+            if (entries[i].topics[0] != createdTopic || entries[i].emitter != address(createdPool)) continue;
+            found = true;
+            (string memory symbol, string memory tokenName, uint8 decimals, uint256 vaultFees) =
+                abi.decode(entries[i].data, (string, string, uint8, uint256));
+            assertEq(symbol, "USDC");
+            assertEq(tokenName, "USD Coin");
+            assertEq(decimals, 18);
+            assertEq(vaultFees, 50 ether);
+            assertEq(
+                address(uint160(uint256(entries[i].topics[2]))),
+                0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE
+            );
+        }
+        assertTrue(found);
     }
 
     function test_stakeUnstakeAndProportionalUserHalf() public {
@@ -321,5 +367,56 @@ contract MiningPoolTest is Test {
         assertEq(spot.earned(alice, address(reward)), 0);
         assertEq(reward.balanceOf(alice), 100 ether);
         assertEq(spot.systemReserve(address(reward)), 100 ether);
+    }
+
+    function test_withdrawStakeAfterPauseReturnsObxOnly() public {
+        vm.prank(operator);
+        spot.setMiningEnabled(address(reward), true);
+        vm.prank(alice);
+        spot.stake(address(reward), 100 ether);
+        vm.prank(bob);
+        spot.stake(address(reward), 100 ether);
+        reward.mint(address(this), 400 ether);
+        reward.approve(address(spotVault), 400 ether);
+        spotVault.addFees(address(reward), 400 ether);
+        spotVault.setPool(address(0));
+
+        vm.prank(alice);
+        vm.expectRevert(bytes("not pool"));
+        spot.unstake(address(reward), 100 ether);
+        assertEq(spot.stakedOf(alice, address(reward)), 100 ether);
+
+        vm.prank(alice);
+        vm.expectRevert(SpotMiningPool.NotPaused.selector);
+        spot.withdrawStake(address(reward));
+
+        vm.prank(operator);
+        spot.pause();
+
+        vm.prank(alice);
+        vm.expectRevert(SpotMiningPool.IsPaused.selector);
+        spot.claim(address(reward));
+
+        vm.prank(alice);
+        spot.withdrawStake(address(reward));
+        assertEq(obx.balanceOf(alice), 1_000 ether);
+        assertEq(reward.balanceOf(alice), 0);
+        assertEq(spot.stakedOf(alice, address(reward)), 0);
+        assertEq(spot.totalStaked(address(reward)), 200 ether);
+        assertEq(spot.stakedOf(bob, address(reward)), 100 ether);
+
+        vm.prank(alice);
+        spot.withdrawStake(address(reward));
+        assertEq(obx.balanceOf(alice), 1_000 ether);
+
+        vm.prank(alice);
+        perps.stake(80 ether);
+        vm.prank(operator);
+        perps.pause();
+        vm.prank(alice);
+        perps.withdrawStake();
+        assertEq(obx.balanceOf(alice), 1_000 ether);
+        assertEq(perps.stakedOf(alice), 0);
+        assertEq(perps.totalStaked(), 80 ether);
     }
 }

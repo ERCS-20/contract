@@ -24,26 +24,65 @@ contract PerpsMiningPool is Ownable, ReentrancyGuard {
     IERC20 public immutable stakeToken;
     IPerpsFeeVault public immutable vault;
 
+    address public operator;
     address public withdrawer;
+    /// @notice Set when the pool is abandoned. Stake, unstake, and claim stop. Users call `withdrawStake`.
+    bool public paused;
     /// @notice System half already pulled into this contract.
     uint256 public systemNative;
 
+    /// @notice Sentinel for native USDC. There is no ERC20 contract for this reward.
+    address public constant REWARD_TOKEN = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
+    string public constant REWARD_SYMBOL = "USDC";
+    string public constant REWARD_NAME = "USD Coin";
+    uint8 public constant REWARD_DECIMALS = 18;
+
     RewardBucket.Bucket internal _bucket;
 
+    event PoolCreated(
+        address indexed pool,
+        address indexed rewardToken,
+        string symbol,
+        string name,
+        uint8 decimals,
+        uint256 vaultFees
+    );
+    event OperatorSet(address indexed operator);
     event WithdrawerSet(address indexed withdrawer);
+    event Paused(address indexed account);
+    event Unpaused(address indexed account);
     event Staked(address indexed user, uint256 amount, uint256 userHalf);
     event Unstaked(address indexed user, uint256 amount, uint256 userHalf);
     event Claimed(address indexed user, uint256 userHalf);
+    event StakeWithdrawn(address indexed user, uint256 amount);
     event SystemWithdrawn(address indexed to, uint256 amount);
     event Rescued(address indexed token, address indexed to, uint256 amount);
 
     error ZeroAddress();
+    error NotOperator();
     error NotWithdrawer();
     error PayFailed();
     error StakeToken();
+    error IsPaused();
+    error NotPaused();
+
+    modifier onlyOperator() {
+        if (msg.sender != operator) revert NotOperator();
+        _;
+    }
 
     modifier onlyWithdrawer() {
         if (msg.sender != withdrawer) revert NotWithdrawer();
+        _;
+    }
+
+    modifier whenNotPaused() {
+        if (paused) revert IsPaused();
+        _;
+    }
+
+    modifier whenPaused() {
+        if (!paused) revert NotPaused();
         _;
     }
 
@@ -52,12 +91,31 @@ contract PerpsMiningPool is Ownable, ReentrancyGuard {
         stakeToken = IERC20(stakeToken_);
         vault = IPerpsFeeVault(vault_);
         _bucket.enabled = true;
+        emit PoolCreated(address(this), REWARD_TOKEN, REWARD_SYMBOL, REWARD_NAME, REWARD_DECIMALS, vault.protocolFees());
+    }
+
+    function setOperator(address operator_) external onlyOwner {
+        if (operator_ == address(0)) revert ZeroAddress();
+        operator = operator_;
+        emit OperatorSet(operator_);
     }
 
     function setWithdrawer(address withdrawer_) external onlyOwner {
         if (withdrawer_ == address(0)) revert ZeroAddress();
         withdrawer = withdrawer_;
         emit WithdrawerSet(withdrawer_);
+    }
+
+    function pause() external onlyOperator {
+        if (paused) revert IsPaused();
+        paused = true;
+        emit Paused(msg.sender);
+    }
+
+    function unpause() external onlyOperator {
+        if (!paused) revert NotPaused();
+        paused = false;
+        emit Unpaused(msg.sender);
     }
 
     function totalStaked() external view returns (uint256) {
@@ -78,22 +136,30 @@ contract PerpsMiningPool is Ownable, ReentrancyGuard {
         return RewardBucket.earned(_bucket, user, vault.protocolFees());
     }
 
-    function stake(uint256 amount) external nonReentrant {
+    function stake(uint256 amount) external whenNotPaused nonReentrant {
         uint256 userHalf = RewardBucket.stake(_bucket, msg.sender, amount, vault.protocolFees());
         stakeToken.safeTransferFrom(msg.sender, address(this), amount);
         _payReward(userHalf);
         emit Staked(msg.sender, amount, userHalf);
     }
 
-    function unstake(uint256 amount) external nonReentrant {
+    function unstake(uint256 amount) external whenNotPaused nonReentrant {
         uint256 userHalf = RewardBucket.unstake(_bucket, msg.sender, amount, vault.protocolFees());
         stakeToken.safeTransfer(msg.sender, amount);
         _payReward(userHalf);
         emit Unstaked(msg.sender, amount, userHalf);
     }
 
-    function claim() external nonReentrant {
+    function claim() external whenNotPaused nonReentrant {
         _payReward(RewardBucket.harvest(_bucket, msg.sender, vault.protocolFees()));
+    }
+
+    /// @notice Return this user's staked OBX after the pool is paused.
+    /// @dev Zeroes only that user's record so it cannot be taken twice. Rewards and bucket totals stay untouched.
+    function withdrawStake() external whenPaused nonReentrant {
+        uint256 amount = RewardBucket.withdrawStake(_bucket, msg.sender);
+        if (amount != 0) stakeToken.safeTransfer(msg.sender, amount);
+        emit StakeWithdrawn(msg.sender, amount);
     }
 
     /// @notice Withdraw system half already left in this contract by user claims.
