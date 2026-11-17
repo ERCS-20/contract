@@ -10,12 +10,12 @@ import {IErcs20Reserves} from "../interfaces/IErcs20Reserves.sol";
 /// @title Ercs20TwapOracle
 /// @notice Multi-market mark price = TWAP of each market's ERCS20 spot mid over `window`.
 /// @dev Samples via `update(marketId, ercs20)` from PerpsExchange. Spot address is not stored here.
-///      Mark is settled inside `update` (1s cadence, 30s window). `getPrice` returns that stored value.
+///      Mark is settled inside `update` (3s cadence, 90s window, 30 samples). `getPrice` returns that stored value.
 contract Ercs20TwapOracle is Ownable, IPerpsOracle, IOracleSampler {
     uint256 public constant BASE = 1e18;
-    uint256 internal constant CARDINALITY = 32;
-    uint256 public constant WINDOW = 30 seconds;
-    uint256 public constant MIN_SAMPLE_INTERVAL = 1;
+    uint256 internal constant CARDINALITY = 30;
+    uint256 public constant WINDOW = 90 seconds;
+    uint256 public constant MIN_SAMPLE_INTERVAL = 3;
 
     struct Observation {
         uint32 timestamp;
@@ -34,9 +34,9 @@ contract Ercs20TwapOracle is Ownable, IPerpsOracle, IOracleSampler {
     }
 
     address public immutable exchange;
-    /// @notice TWAP window (default 30 seconds).
+    /// @notice TWAP window (default 90 seconds).
     uint256 public immutable window;
-    /// @notice Minimum seconds between samples (default 1).
+    /// @notice Minimum seconds between samples (default 3).
     uint256 public immutable minSampleInterval;
 
     mapping(uint256 => MarketState) internal _markets;

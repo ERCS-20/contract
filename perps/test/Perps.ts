@@ -33,6 +33,30 @@ async function settleOne(
   makerNonce: bigint,
   takerNonce: bigint,
 ) {
+  await settleSides(
+    ctx,
+    exchangeAsOp,
+    maker,
+    taker,
+    amount,
+    orderMargin,
+    orderMargin,
+    makerNonce,
+    takerNonce,
+  );
+}
+
+async function settleSides(
+  ctx: Awaited<ReturnType<typeof deployPerpsSystem>>,
+  exchangeAsOp: { write: { settleTrades: (args: any) => Promise<unknown> } },
+  maker: WalletClient,
+  taker: WalletClient,
+  amount: bigint,
+  makerMargin: bigint,
+  takerMargin: bigint,
+  makerNonce: bigint,
+  takerNonce: bigint,
+) {
   const { chainId, exchange, MARKET_ID, PRICE } = ctx;
   const expiry = BigInt(Math.floor(Date.now() / 1000) + 3600);
   const makerAddr = maker.account!.address as Address;
@@ -42,7 +66,7 @@ async function settleOne(
     trader: makerAddr,
     marketId: MARKET_ID,
     amount,
-    margin: orderMargin,
+    margin: makerMargin,
     priceX18: PRICE,
     isBuy: false,
     nonce: makerNonce,
@@ -52,7 +76,7 @@ async function settleOne(
     trader: takerAddr,
     marketId: MARKET_ID,
     amount,
-    margin: orderMargin,
+    margin: takerMargin,
     priceX18: PRICE,
     isBuy: true,
     nonce: takerNonce,
@@ -173,6 +197,23 @@ describe("PerpsExchange", async function () {
     assert.equal(await vault.read.balances([taker.account.address]), 500n * COL - orderMargin);
     assert.equal(await vault.read.balances([maker.account.address]), 500n * COL - orderMargin);
     assert.equal(await vault.read.protocolFees(), makerFee + takerFee);
+  });
+
+  it("opening with no signed margin reverts", async function () {
+    const ctx = await deployPerpsSystem();
+    const { viem, publicClient, maker, taker, operator, exchange } = ctx;
+
+    await fundAndDeposit(ctx, maker, 500n * COL);
+    await fundAndDeposit(ctx, taker, 500n * COL);
+    const exchangeAsOp = await viem.getContractAt("PerpsExchange", exchange.address, {
+      client: { public: publicClient, wallet: operator },
+    });
+
+    await viem.assertions.revertWithCustomError(
+      settleOne(ctx, exchangeAsOp, maker, taker, 1n * COL, 0n, 1n, 1n),
+      exchange,
+      "InsufficientMargin",
+    );
   });
 
   it("settleTrades self-trade nets position and returns leftover margin", async function () {
@@ -370,14 +411,14 @@ describe("PerpsExchange", async function () {
     const { viem, publicClient, chainId, maker, taker, operator, exchange, MARKET_ID, PRICE } = ctx;
 
     const amount = 1n * COL;
-    const orderMargin = 50n * COL;
+    // Short posts 50 (margin ≈ 150). Long posts 200 so the open itself stays funded.
     await fundAndDeposit(ctx, maker, 500n * COL);
     await fundAndDeposit(ctx, taker, 500n * COL);
 
     const exchangeAsOp = await viem.getContractAt("PerpsExchange", exchange.address, {
       client: { public: publicClient, wallet: operator },
     });
-    await settleOne(ctx, exchangeAsOp, maker, taker, amount, orderMargin, 1n, 1n);
+    await settleSides(ctx, exchangeAsOp, maker, taker, amount, 50n * COL, 200n * COL, 1n, 1n);
 
     // Short covers at a loss: leftover margin is negative when position hits 0.
     const closePrice = 160n * COL;
@@ -533,9 +574,9 @@ describe("PerpsExchange", async function () {
       ADL_THRESHOLD,
     } = ctx;
 
-    // High leverage long: bring 50, buy 1 @ 100 → margin=-(50+takerFee), pos=+1
+    // Short opened @100 with margin ≈ 300. Mark 280 makes 110% fail (needs 308).
     const amount = 1n * COL;
-    const orderMargin = 50n * COL;
+    const orderMargin = 200n * COL;
     await fundAndDeposit(ctx, maker, 500n * COL);
     await fundAndDeposit(ctx, taker, 500n * COL);
     await seedInsuranceMargin(ctx, liquidator, ADL_THRESHOLD);
@@ -544,23 +585,22 @@ describe("PerpsExchange", async function () {
       client: { public: publicClient, wallet: operator },
     });
     await settleOne(ctx, exchangeAsOp, maker, taker, amount, orderMargin, 1n, 1n);
-    const { takerFee } = tradeFees(amount, PRICE);
-    // Drop mark so long is undercollateralized.
-    await oracle.write.setPrice([MARKET_ID, 50n * COL]);
+    const { makerFee } = tradeFees(amount, PRICE);
+    await oracle.write.setPrice([MARKET_ID, 280n * COL]);
     await exchangeAsOp.write.liquidate([
       MARKET_ID,
-      taker.account.address,
+      maker.account.address,
       liquidator.account.address,
     ]);
 
-    const takerBal = await exchange.read.balances([taker.account.address, MARKET_ID]);
-    assert.equal(takerBal[0], 0n);
-    assert.equal(takerBal[1], 0n);
+    const makerBal = await exchange.read.balances([maker.account.address, MARKET_ID]);
+    assert.equal(makerBal[0], 0n);
+    assert.equal(makerBal[1], 0n);
 
     const liqBal = await exchange.read.balances([liquidator.account.address, MARKET_ID]);
-    // L absorbs signed margin (-50 - takerFee) and position (+1)
-    assert.equal(liqBal[0], ADL_THRESHOLD - 50n * COL - takerFee);
-    assert.equal(liqBal[1], amount);
+    // L absorbs the short: margin 200 + 100 - makerFee, position -1.
+    assert.equal(liqBal[0], ADL_THRESHOLD + 300n * COL - makerFee);
+    assert.equal(liqBal[1], -amount);
   });
 
   it("liquidator margin stays parked after ADL", async function () {
@@ -580,38 +620,37 @@ describe("PerpsExchange", async function () {
     } = ctx;
 
     const amount = 1n * COL;
-    const orderMargin = 50n * COL;
-    const adlThreshold = 200n * COL;
+    const orderMargin = 200n * COL;
     await fundAndDeposit(ctx, maker, 500n * COL);
     await fundAndDeposit(ctx, taker, 500n * COL);
-    // After absorb user -50: margin == threshold (ADL armed); ADL quote 50 leaves parked remainder.
-    await seedInsuranceMargin(ctx, liquidator, adlThreshold + 50n * COL);
+    await seedInsuranceMargin(ctx, liquidator, 50n * COL);
 
     const exchangeAsDao = await viem.getContractAt("PerpsExchange", exchange.address, {
       client: { public: publicClient, wallet: dao },
     });
-    await exchangeAsDao.write.setAdlEquityThreshold([MARKET_ID, adlThreshold]);
+    // Above the short's margin, so absorbing it still leaves L at or under the line.
+    await exchangeAsDao.write.setAdlEquityThreshold([MARKET_ID, 400n * COL]);
 
     const exchangeAsOp = await viem.getContractAt("PerpsExchange", exchange.address, {
       client: { public: publicClient, wallet: operator },
     });
     await settleOne(ctx, exchangeAsOp, maker, taker, amount, orderMargin, 1n, 1n);
 
-    await oracle.write.setPrice([MARKET_ID, 50n * COL]);
+    await oracle.write.setPrice([MARKET_ID, 280n * COL]);
     await exchangeAsOp.write.liquidate([
       MARKET_ID,
-      taker.account.address,
+      maker.account.address,
       liquidator.account.address,
     ]);
 
     const vaultBefore = await vault.read.balances([liquidator.account.address]);
-    // ADL closes L inventory; margin must remain parked (not auto-returned to vault).
+    // ADL sells the remaining long against L's short. L's margin stays parked.
     await exchangeAsOp.write.executeAdl([
       MARKET_ID,
-      maker.account.address,
+      taker.account.address,
       liquidator.account.address,
       amount,
-      true,
+      false,
     ]);
     const liqBal = await exchange.read.balances([liquidator.account.address, MARKET_ID]);
     assert.equal(liqBal[1], 0n);
@@ -635,22 +674,26 @@ describe("PerpsExchange", async function () {
     } = ctx;
 
     const amount = 1n * COL;
-    const orderMargin = 50n * COL;
+    const orderMargin = 200n * COL;
     await fundAndDeposit(ctx, maker, 500n * COL);
     await fundAndDeposit(ctx, taker, 500n * COL);
-    // After absorbing user margin=-50, L.margin == threshold ⇒ ADL armed.
-    await seedInsuranceMargin(ctx, liquidator, ADL_THRESHOLD + 50n * COL);
+    await seedInsuranceMargin(ctx, liquidator, ADL_THRESHOLD);
+
+    const exchangeAsDao = await viem.getContractAt("PerpsExchange", exchange.address, {
+      client: { public: publicClient, wallet: ctx.dao },
+    });
+    await exchangeAsDao.write.setAdlEquityThreshold([MARKET_ID, 400n * COL]);
 
     const exchangeAsOp = await viem.getContractAt("PerpsExchange", exchange.address, {
       client: { public: publicClient, wallet: operator },
     });
     await settleOne(ctx, exchangeAsOp, maker, taker, amount, orderMargin, 1n, 1n);
 
-    // Drop mark so long is undercollateralized, then liquidate into L.
-    await oracle.write.setPrice([MARKET_ID, 50n * COL]);
+    // Raise mark so the short is undercollateralized, then liquidate into L.
+    await oracle.write.setPrice([MARKET_ID, 280n * COL]);
     await exchangeAsOp.write.liquidate([
       MARKET_ID,
-      taker.account.address,
+      maker.account.address,
       liquidator.account.address,
     ]);
 
@@ -659,17 +702,37 @@ describe("PerpsExchange", async function () {
       true,
     );
 
-    // Maker is short; ADL buy (userIsBuy=true) closes short vs L long.
+    // Taker is long; ADL sell (userIsBuy=false) closes it against L's short.
+    await assert.rejects(
+      exchangeAsOp.write.executeAdl([
+        MARKET_ID,
+        taker.account.address,
+        liquidator.account.address,
+        amount + 1n,
+        false,
+      ]),
+      /AdlExceedsPosition/,
+    );
+    await assert.rejects(
+      exchangeAsOp.write.executeAdl([
+        MARKET_ID,
+        taker.account.address,
+        liquidator.account.address,
+        amount,
+        true,
+      ]),
+      /AdlExceedsPosition/,
+    );
     await exchangeAsOp.write.executeAdl([
       MARKET_ID,
-      maker.account.address,
+      taker.account.address,
       liquidator.account.address,
       amount,
-      true,
+      false,
     ]);
 
-    const makerBal = await exchange.read.balances([maker.account.address, MARKET_ID]);
-    assert.equal(makerBal[1], 0n);
+    const takerBal = await exchange.read.balances([taker.account.address, MARKET_ID]);
+    assert.equal(takerBal[1], 0n);
 
     const liqBal = await exchange.read.balances([liquidator.account.address, MARKET_ID]);
     assert.equal(liqBal[1], 0n);
@@ -903,7 +966,7 @@ describe("PerpsExchange", async function () {
     const ctx = await deployPerpsSystem();
     const { viem, publicClient, maker, taker, operator, exchange, vault, MARKET_ID } = ctx;
 
-    // Maker short 1 @ 100 with thin margin → margin=150, pos=-1 after fill.
+    // Maker short posts 50 → margin ≈ 150. Taker posts 110 so the long is funded.
     const amount = 1n * COL;
     await fundAndDeposit(ctx, maker, 200n * COL);
     await fundAndDeposit(ctx, taker, 200n * COL);
@@ -911,7 +974,7 @@ describe("PerpsExchange", async function () {
     const exchangeAsOp = await viem.getContractAt("PerpsExchange", exchange.address, {
       client: { public: publicClient, wallet: operator },
     });
-    await settleOne(ctx, exchangeAsOp, maker, taker, amount, 50n * COL, 1n, 1n);
+    await settleSides(ctx, exchangeAsOp, maker, taker, amount, 50n * COL, 110n * COL, 1n, 1n);
 
     // Settle at 200: maker equity = 150 - 200 = -50 < 0.
     await exchange.write.enableFinalSettlement([MARKET_ID, 200n * COL]);
@@ -940,7 +1003,7 @@ describe("PerpsExchange", async function () {
     const exchangeAsOp = await viem.getContractAt("PerpsExchange", exchange.address, {
       client: { public: publicClient, wallet: operator },
     });
-    await settleOne(ctx, exchangeAsOp, maker, taker, amount, 50n * COL, 1n, 1n);
+    await settleSides(ctx, exchangeAsOp, maker, taker, amount, 50n * COL, 110n * COL, 1n, 1n);
 
     // Underwater wipe leaves stranded USDC in the market pot.
     await exchange.write.enableFinalSettlement([MARKET_ID, 200n * COL]);

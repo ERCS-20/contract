@@ -30,7 +30,7 @@ describe("Ercs20TwapOracle", async function () {
     assert.equal(await oracle.read.getPrice([MARKET_ID]), 100n * COL);
   });
 
-  it("respects 1s sample interval", async function () {
+  it("respects 3s sample interval", async function () {
     const { viem, networkHelpers, spot } = await deploy();
     const harness = await viem.deployContract("TwapUpdateHarness", []);
     const oracle = await viem.deployContract("Ercs20TwapOracle", [harness.address]);
@@ -46,6 +46,10 @@ describe("Ercs20TwapOracle", async function () {
     await spot.write.setReserves([1n * COL, 200n * COL]);
     await networkHelpers.time.setNextBlockTimestamp(sampledAt + 2n);
     await harness.write.update([oracle.address, MARKET_ID, spot.address]);
+    assert.equal(await oracle.read.lastMidX18([MARKET_ID]), 100n * COL);
+
+    await networkHelpers.time.setNextBlockTimestamp(sampledAt + 3n);
+    await harness.write.update([oracle.address, MARKET_ID, spot.address]);
     assert.equal(await oracle.read.lastMidX18([MARKET_ID]), 200n * COL);
   });
 
@@ -56,17 +60,17 @@ describe("Ercs20TwapOracle", async function () {
     await networkHelpers.time.setNextBlockTimestamp(t);
     await oracleAsExchange.write.update([MARKET_ID, spot.address]);
 
-    await networkHelpers.time.setNextBlockTimestamp(t + 1n);
+    await networkHelpers.time.setNextBlockTimestamp(t + 2n);
     await spot.write.setReserves([1n * COL, 200n * COL]);
 
-    await networkHelpers.time.setNextBlockTimestamp(t + 2n);
+    await networkHelpers.time.setNextBlockTimestamp(t + 3n);
     await oracleAsExchange.write.update([MARKET_ID, spot.address]);
 
-    await networkHelpers.time.setNextBlockTimestamp(t + 4n);
+    await networkHelpers.time.setNextBlockTimestamp(t + 6n);
     await oracleAsExchange.write.update([MARKET_ID, spot.address]);
 
     const mark = await oracle.read.getPrice([MARKET_ID]);
-    // 2s at 100 then 2s at 200 → 150. Time after this sample does not move the stored mark.
+    // 3s at 100 then 3s at 200 → 150. Time after this sample does not move the stored mark.
     assert.equal(mark, 150n * COL);
 
     await networkHelpers.time.setNextBlockTimestamp(t + 20n);
