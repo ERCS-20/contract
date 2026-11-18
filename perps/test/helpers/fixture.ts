@@ -3,7 +3,7 @@ import { network } from "hardhat";
 export const MARKET_ID = 1n;
 /** Mark / fill price: 100 quote per base, 1e18 fixed-point. */
 export const PRICE = 100n * 10n ** 18n;
-/** Fixed ADL margin threshold in collateral units (ARC native USDC = 18 decimals). */
+/** Fixed ADL equity threshold in collateral units (ARC native USDC = 18 decimals). */
 export const ADL_THRESHOLD = 50n * 10n ** 18n;
 /** Min collateralization ratio: 110% = 1.1e18. */
 export const MIN_COLLATERAL = 11n * 10n ** 17n;

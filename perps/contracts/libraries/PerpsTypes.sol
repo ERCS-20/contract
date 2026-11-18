@@ -27,7 +27,7 @@ library PerpsTypes {
         address ercs20;
         bool exists;
         bool paused;
-        /// @notice ADL trigger: liquidator Balance.margin ≤ this (absolute USDC units).
+        /// @notice ADL trigger: liquidator mark equity below this (absolute USDC units).
         uint256 adlEquityThreshold;
         /// @notice Min collateralization ratio (1e18 = 100%). Factory default: 1.0055e18.
         uint256 minCollateralX18;

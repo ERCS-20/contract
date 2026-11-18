@@ -73,7 +73,7 @@
 S 权益 = 现金 ± 接仓盯市盈亏
 
 链上只存固定阈值 adlEquityThreshold（USDC 计量的绝对数）
-ADL 触发：当前权益 ≤ adlEquityThreshold
+ADL 触发：当前权益 < adlEquityThreshold
 ```
 
 **8% 不在合约里每次动态算**（相对峰值/占比容易扯皮、也不好验）。  
@@ -81,7 +81,7 @@ ADL 触发：当前权益 ≤ adlEquityThreshold
 
 1. 治理 / 运营按当时 **总金额的 8%** 算出一个固定阈值（「总金额」v0 建议取该市场 **S 当前权益**，或书面定为「S 现金 + 约定口径」）；  
 2. 调用合约 `setAdlEquityThreshold(marketId, value)` 写入；  
-3. 合约执行时只做：`equity <= adlEquityThreshold`。
+3. 合约执行时只做：`equity < adlEquityThreshold`。
 
 总金额变化后若要维持约 8%，由运营 **重新计算并更新** 固定阈值，而不是链上自动按比例漂移。
 
@@ -126,7 +126,7 @@ ADL 触发：当前权益 ≤ adlEquityThreshold
 | 抵押 | 仅 USDC |
 | 兑付缓冲 | **每市场系统账户 S**（不再单独维护 PP/Claim） |
 | 强平接仓 | **系统 S**（v0） |
-| 不足时 | **触线 ADL：权益 ≤ 固定阈值**（设阈值时按总金额约 8%），无 Claim |
+| 不足时 | **触线 ADL：权益 < 固定阈值**（设阈值时按总金额约 8%），无 Claim |
 | MCR | **不作为协议组件**；可选展示 S 权益即可 |
 
 ---
@@ -148,7 +148,7 @@ Q_L^{\mathrm{user}} + Q_L^{S} = Q_S^{\mathrm{user}} + Q_S^{S}
 
 详见 [`docs/DEV_OPEN_QUESTIONS.md`](./docs/DEV_OPEN_QUESTIONS.md)。优先：
 
-1. ~~S 触线~~（**已决：权益 ≤ 固定阈值 `adlEquityThreshold`**；阈值由运营按总金额约 8% 设入合约）  
+1. ~~S 触线~~（**已决：权益 < 固定阈值 `adlEquityThreshold`**；阈值由运营按总金额约 8% 设入合约）  
 2. ADL 排序规则（盈利率 / 杠杆 / 仓位大小）  
 3. ~~盈利 C 谁算~~（**已决 A4=C**：引擎 fill + 链上校验）  
 4. 充提 / 强提（B2）  

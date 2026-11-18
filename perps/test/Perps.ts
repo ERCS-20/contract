@@ -628,7 +628,7 @@ describe("PerpsExchange", async function () {
     const exchangeAsDao = await viem.getContractAt("PerpsExchange", exchange.address, {
       client: { public: publicClient, wallet: dao },
     });
-    // Above the short's margin, so absorbing it still leaves L at or under the line.
+    // Above the short's post-merge equity, so absorbing it leaves L under the ADL line.
     await exchangeAsDao.write.setAdlEquityThreshold([MARKET_ID, 400n * COL]);
 
     const exchangeAsOp = await viem.getContractAt("PerpsExchange", exchange.address, {
@@ -658,7 +658,7 @@ describe("PerpsExchange", async function () {
     assert.equal(await vault.read.balances([liquidator.account.address]), vaultBefore);
   });
 
-  it("executeAdl runs when liquidator margin is at or below threshold", async function () {
+  it("executeAdl runs when liquidator equity is below threshold", async function () {
     const ctx = await deployPerpsSystem();
     const {
       viem,
@@ -736,6 +736,115 @@ describe("PerpsExchange", async function () {
 
     const liqBal = await exchange.read.balances([liquidator.account.address, MARKET_ID]);
     assert.equal(liqBal[1], 0n);
+  });
+
+  it("ADL arms only when liquidator equity is below the threshold", async function () {
+    const ctx = await deployPerpsSystem();
+    const {
+      viem,
+      publicClient,
+      maker,
+      taker,
+      operator,
+      liquidator,
+      exchange,
+      oracle,
+      MARKET_ID,
+      PRICE,
+      ADL_THRESHOLD,
+    } = ctx;
+
+    const amount = 1n * COL;
+    const orderMargin = 200n * COL;
+    await fundAndDeposit(ctx, maker, 500n * COL);
+    await fundAndDeposit(ctx, taker, 500n * COL);
+    await seedInsuranceMargin(ctx, liquidator, ADL_THRESHOLD);
+
+    const exchangeAsDao = await viem.getContractAt("PerpsExchange", exchange.address, {
+      client: { public: publicClient, wallet: ctx.dao },
+    });
+    const exchangeAsOp = await viem.getContractAt("PerpsExchange", exchange.address, {
+      client: { public: publicClient, wallet: operator },
+    });
+    await settleOne(ctx, exchangeAsOp, maker, taker, amount, orderMargin, 1n, 1n);
+    const { makerFee } = tradeFees(amount, PRICE);
+
+    // Mark 280: short is liquidatable, merged equity stays above the default threshold.
+    await oracle.write.setPrice([MARKET_ID, 280n * COL]);
+    await exchangeAsOp.write.liquidate([
+      MARKET_ID,
+      maker.account.address,
+      liquidator.account.address,
+    ]);
+
+    const margin = ADL_THRESHOLD + 300n * COL - makerFee;
+    const equity = margin - 280n * COL;
+    assert.ok(equity > ADL_THRESHOLD);
+    assert.ok(margin > equity);
+    assert.equal(
+      await exchange.read.isAdlTriggered([MARKET_ID, liquidator.account.address]),
+      false,
+    );
+
+    // Equal to equity does not arm. One unit above does, even though margin is still higher.
+    await exchangeAsDao.write.setAdlEquityThreshold([MARKET_ID, equity]);
+    assert.equal(
+      await exchange.read.isAdlTriggered([MARKET_ID, liquidator.account.address]),
+      false,
+    );
+    await exchangeAsDao.write.setAdlEquityThreshold([MARKET_ID, equity + 1n]);
+    assert.equal(
+      await exchange.read.isAdlTriggered([MARKET_ID, liquidator.account.address]),
+      true,
+    );
+  });
+
+  it("liquidate merges when liquidator equity goes negative", async function () {
+    const ctx = await deployPerpsSystem();
+    const {
+      viem,
+      publicClient,
+      maker,
+      taker,
+      operator,
+      liquidator,
+      exchange,
+      oracle,
+      MARKET_ID,
+      PRICE,
+      ADL_THRESHOLD,
+    } = ctx;
+
+    const amount = 1n * COL;
+    const orderMargin = 200n * COL;
+    await fundAndDeposit(ctx, maker, 500n * COL);
+    await fundAndDeposit(ctx, taker, 500n * COL);
+    await seedInsuranceMargin(ctx, liquidator, ADL_THRESHOLD);
+
+    const exchangeAsOp = await viem.getContractAt("PerpsExchange", exchange.address, {
+      client: { public: publicClient, wallet: operator },
+    });
+    await settleOne(ctx, exchangeAsOp, maker, taker, amount, orderMargin, 1n, 1n);
+    const { makerFee } = tradeFees(amount, PRICE);
+
+    // Merged equity is about -50 while margin stays near 350, above the default threshold.
+    await oracle.write.setPrice([MARKET_ID, 400n * COL]);
+    await exchangeAsOp.write.liquidate([
+      MARKET_ID,
+      maker.account.address,
+      liquidator.account.address,
+    ]);
+
+    const margin = ADL_THRESHOLD + 300n * COL - makerFee;
+    const liqBal = await exchange.read.balances([liquidator.account.address, MARKET_ID]);
+    assert.equal(liqBal[0], margin);
+    assert.equal(liqBal[1], -amount);
+    assert.ok(margin - 400n * COL < 0n);
+    assert.ok(margin > ADL_THRESHOLD);
+    assert.equal(
+      await exchange.read.isAdlTriggered([MARKET_ID, liquidator.account.address]),
+      true,
+    );
   });
 
   it("funding: positive rate debits longs and credits shorts over time", async function () {

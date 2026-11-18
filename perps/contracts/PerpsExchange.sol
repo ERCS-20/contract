@@ -72,9 +72,9 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     event FunderSet(address indexed funder);
     event FundingIndexUpdated(uint256 indexed marketId, int256 value, uint256 timestamp);
     event FundingSettled(address indexed account, uint256 indexed marketId, int256 marginDelta, uint256 startTimestamp, uint256 endTimestamp, int256 value);
-    /// @notice `makerMarginIn` / `takerMarginIn` = collateral pulled this fill (0 on pure reduce).
-    ///         `makerMargin` / `makerPosition` / `taker*` = current Balance after fill, fees, and flat auto-return.
-    event TradeSettled(uint256 indexed marketId, address indexed maker, address indexed taker, uint256 amount, uint256 priceX18, uint256 makerMarginIn, uint256 takerMarginIn, uint256 makerFee, uint256 takerFee);
+    /// @notice `makerIsBuy` is the maker side; the taker takes the opposite side.
+    ///         `makerMarginIn` / `takerMarginIn` = collateral pulled this fill (0 on pure reduce).
+    event TradeSettled(uint256 indexed marketId, address indexed maker, address indexed taker, uint256 amount, uint256 priceX18, bool makerIsBuy, uint256 makerMarginIn, uint256 takerMarginIn, uint256 makerFee, uint256 takerFee);
     event MarginAdded(address indexed account, uint256 indexed marketId, uint256 amount);
     event MarginWithdraw(address indexed account, uint256 indexed marketId, uint256 amount);
     event MarginSettled(address indexed account, uint256 indexed marketId, uint256 amount);
@@ -126,7 +126,6 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     error NotLiquidatable();
     error InvalidMinCollateral();
     error NotLiquidator();
-    error LiquidatorCannotTake();
     error NoLastPrice();
     error NoPosition();
     error InsufficientMargin();
@@ -407,7 +406,7 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     }
 
     /// @notice Liquidate account into `liquidator`: merge full Balance (margin + position, signed).
-    /// @dev Reverts if L mark equity would be negative after the merge (fund L first).
+    /// @dev Post-merge equity may be negative. ADL keys off that equity, not this call.
     function liquidate(uint256 marketId, address account, address liquidator) external onlyOperator  {
         if (!isLiquidator[liquidator]) revert NotLiquidator();
         PerpsTypes.Market storage m = _market(marketId);
@@ -428,10 +427,6 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         liqBal.margin += userBal.margin;
         liqBal.position += userBal.position;
 
-        if (PerpsMath.equity(liqBal.margin, liqBal.position, mark) < 0) {
-            revert LiquidatorCannotTake();
-        }
-
         _setBalance(liquidator, marketId, liqBal);
         _clearBalance(account, marketId);
 
@@ -440,7 +435,7 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         );
     }
 
-    /// @notice ADL: force trade account against liquidator at mark when L margin ≤ threshold.
+    /// @notice ADL: force trade account against liquidator at mark when L equity is below threshold.
     function executeAdl(
         uint256 marketId,
         address account,
@@ -503,7 +498,9 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     // -------------------------------------------------------------------------
 
     function _isAdlTriggered(uint256 marketId, address liquidator) private view returns (bool) {
-        return balances[liquidator][marketId].margin <= int256(markets[marketId].adlEquityThreshold);
+        uint256 mark = IPerpsOracle(oracle).getPrice(marketId);
+        PerpsTypes.Balance storage b = balances[liquidator][marketId];
+        return PerpsMath.equity(b.margin, b.position, mark) < int256(markets[marketId].adlEquityThreshold);
     }
 
     function _settleTrades(PerpsTypes.TradeSettlement calldata s) private {
@@ -547,13 +544,18 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         _settleAccountFunding(makerOrder.trader, marketId, fundingIndex[marketId]);
         _consumeFill(makerOrder, makerSignature, fill.amount);
 
-        (uint256 makerFee, uint256 makerMarginIn, bool makerOpened) = _prepareSide(makerOrder, fill.amount, fill.priceX18, false);
-        (uint256 takerFee, uint256 takerMarginIn, bool takerOpened) = _prepareSide(takerOrder, fill.amount, fill.priceX18, true);
+        (uint256 makerMarginIn, bool makerOpened) = _prepareSide(makerOrder, fill.amount);
+        (uint256 takerMarginIn, bool takerOpened) = _prepareSide(takerOrder, fill.amount);
 
         // Storage in-place, maker then taker. Same trader aliases one slot so self-trades net
         // correctly (memory copies + double _setBalance would let the second write clobber the first).
-        _applyFillSide(makerOrder.trader, marketId, fill.amount, fill.priceX18, makerOrder.isBuy, makerMarginIn, makerFee);
-        _applyFillSide(takerOrder.trader, marketId, fill.amount, fill.priceX18, takerOrder.isBuy, takerMarginIn, takerFee);
+        // Both opening checks above read position before either write.
+        uint256 makerFee = _applyFillSide(
+            makerOrder.trader, marketId, fill.amount, fill.priceX18, makerOrder.isBuy, makerMarginIn, false
+        );
+        uint256 takerFee = _applyFillSide(
+            takerOrder.trader, marketId, fill.amount, fill.priceX18, takerOrder.isBuy, takerMarginIn, true
+        );
         if (makerOrder.trader == takerOrder.trader) {
             if (makerOpened || takerOpened) {
                 _requireOpenedCollateral(makerOrder.trader, marketId, fill.priceX18);
@@ -570,6 +572,7 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
             takerOrder.trader,
             fill.amount,
             fill.priceX18,
+            makerOrder.isBuy,
             makerMarginIn,
             takerMarginIn,
             makerFee,
@@ -641,8 +644,10 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         }
     }
 
-    /// @dev Credit `marginIn`, apply fill delta, debit `fee` on one side. Uses storage so a
-    ///      maker==taker self-trade aliases and nets instead of clobbering via memory copies.
+    /// @dev Credit `marginIn`, apply fill delta, debit the trading fee on one side.
+    ///      Fee is taken from the same quote booked on this fill: maker 0.02%, taker 0.05%.
+    ///      Uses storage so a maker==taker self-trade aliases and nets instead of clobbering via memory copies.
+    /// @return fee Trading fee charged on this side.
     function _applyFillSide(
         address account,
         uint256 marketId,
@@ -650,13 +655,14 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         uint256 priceX18,
         bool isBuy,
         uint256 marginIn,
-        uint256 fee
-    ) private {
+        bool isTaker
+    ) private returns (uint256 fee) {
         PerpsTypes.Balance storage bal = balances[account][marketId];
         bal.margin += int256(marginIn);
 
         int256 posAmt = int256(amount);
-        int256 quoteAmt = int256((amount * priceX18) / PerpsTypes.ONE_X18);
+        uint256 quote = (amount * priceX18) / PerpsTypes.ONE_X18;
+        int256 quoteAmt = int256(quote);
         if (isBuy) {
             bal.position += posAmt;
             bal.margin -= quoteAmt;
@@ -665,33 +671,29 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
             bal.margin += quoteAmt;
         }
 
+        fee = isTaker
+            ? (quote * TAKER_FEE_NUMERATOR) / FEE_DENOMINATOR
+            : (quote * MAKER_FEE_NUMERATOR) / FEE_DENOMINATOR;
         bal.margin -= int256(fee);
     }
 
     /// @dev Opening/increasing size pulls proportional `order.margin` from vault free (pot only).
     ///      Balance.margin is credited later in the same settle writeback as the fill.
-    ///      Pure reduce pulls nothing (fee is debited from existing margin afterward).
+    ///      Pure reduce pulls nothing (fee is debited from existing margin in `_applyFillSide`).
+    ///      Call both sides before either apply: opening size is the pre-trade position.
     ///      After the fill, an opening side must have margin >= 0 and be collateralized at the fill price.
-    /// @return fee Trading fee for this fill.
     /// @return want Collateral pulled this fill (`0` on pure reduce).
     /// @return opened True when this fill increases exposure.
-    function _prepareSide(
-        PerpsTypes.Order calldata order,
-        uint256 fillAmount,
-        uint256 fillPriceX18,
-        bool isTaker
-    ) private returns (uint256 fee, uint256 want, bool opened) {
-        uint256 notional = (fillAmount * fillPriceX18) / PerpsTypes.ONE_X18;
-        fee = isTaker
-            ? (notional * TAKER_FEE_NUMERATOR) / FEE_DENOMINATOR
-            : (notional * MAKER_FEE_NUMERATOR) / FEE_DENOMINATOR;
-
+    function _prepareSide(PerpsTypes.Order calldata order, uint256 fillAmount)
+        private
+        returns (uint256 want, bool opened)
+    {
         PerpsTypes.Balance storage b = balances[order.trader][order.marketId];
         uint256 opening = _openingSize(order.isBuy, b.position, fillAmount);
-        if (opening == 0) return (fee, 0, false);
+        if (opening == 0) return (0, false);
 
         want = PerpsMath.fillMargin(order.margin, order.amount, opening);
-        _pullMargin(order.trader, order.marketId, want);
+        if (want != 0) vault.adjustUserBalance(order.trader, order.marketId, -int256(want));
         opened = true;
     }
 
@@ -716,12 +718,6 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         if (position <= 0) return fillAmount;
         uint256 long_ = uint256(position);
         return fillAmount > long_ ? fillAmount - long_ : 0;
-    }
-
-    /// @dev Move `amount` from vault free → market pot. Caller credits Balance.margin in the same writeback.
-    function _pullMargin(address account, uint256 marketId, uint256 amount) private {
-        if (amount == 0) return;
-        vault.adjustUserBalance(account, marketId, -int256(amount));
     }
 
     function _creditMargin(address account, uint256 marketId, int256 amount) private {
