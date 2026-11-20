@@ -78,27 +78,9 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     event MarginAdded(address indexed account, uint256 indexed marketId, uint256 amount);
     event MarginWithdraw(address indexed account, uint256 indexed marketId, uint256 amount);
     event MarginSettled(address indexed account, uint256 indexed marketId, uint256 amount);
-    event Liquidated(
-        uint256 indexed marketId,
-        address indexed account,
-        address indexed liquidator,
-        int256 position,
-        int256 marginSeized,
-        uint256 markPriceX18,
-        int256 liquidatorMargin,
-        int256 liquidatorPosition
-    );
-    event AdlExecuted(
-        uint256 indexed marketId,
-        address indexed account,
-        address indexed liquidator,
-        int256 closedSize,
-        uint256 priceX18,
-        int256 userMargin,
-        int256 userPosition,
-        int256 liquidatorMargin,
-        int256 liquidatorPosition
-    );
+    event Liquidated(uint256 indexed marketId, address indexed account, address indexed liquidator, int256 positionDelta, int256 marginDelta, uint256 markPriceX18);
+    /// @dev `positionDelta` / `marginDelta` apply to the liquidator. The account's trade deltas are the negation.
+    event AdlExecuted(uint256 indexed marketId, address indexed account, address indexed liquidator, int256 positionDelta, int256 marginDelta, uint256 priceX18, uint256 markPriceX18);
     event FinalSettlementEnabled(uint256 indexed marketId, uint256 settlementPriceX18, uint256 lockedAt);
     event FinalSettlementWithdrawn(address indexed account, uint256 indexed marketId, uint256 amount);
     event FinalSettlementPotReclaimed(uint256 indexed marketId, address indexed to, uint256 amount);
@@ -405,9 +387,45 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         _sampleFunding(runMarketId, markets[runMarketId]);
     }
 
-    /// @notice Liquidate account into `liquidator`: merge full Balance (margin + position, signed).
-    /// @dev Post-merge equity may be negative. ADL keys off that equity, not this call.
-    function liquidate(uint256 marketId, address account, address liquidator) external onlyOperator  {
+    /// @notice Liquidate each account into its liquidator: merge full Balance (margin + position, signed).
+    /// @dev Applied in order. Post-merge equity may be negative. ADL keys off that equity, not this call.
+    function liquidate(PerpsTypes.Liquidation[] calldata liquidations) external onlyOperator {
+        uint256 length = liquidations.length;
+        for (uint256 i; i < length;) {
+            _liquidate(liquidations[i]);
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
+    /// @notice ADL: force-close each account against its liquidator at the given price when L equity is below threshold.
+    /// @dev Applied in order. Later rows see balances updated by earlier rows in the same call.
+    function executeAdl(PerpsTypes.AdlExecution[] calldata executions) external onlyOperator {
+        uint256 length = executions.length;
+        for (uint256 i; i < length;) {
+            _executeAdl(executions[i]);
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
+    function isAdlTriggered(uint256 marketId, address liquidator) external view returns (bool) {
+        _requireMarket(marketId);
+        if (!isLiquidator[liquidator]) return false;
+        return _isAdlTriggered(marketId, liquidator, IPerpsOracle(oracle).getPrice(marketId));
+    }
+
+    // -------------------------------------------------------------------------
+    // Internal
+    // -------------------------------------------------------------------------
+
+    function _liquidate(PerpsTypes.Liquidation calldata liquidation) private {
+        uint256 marketId = liquidation.marketId;
+        address account = liquidation.account;
+        address liquidator = liquidation.liquidator;
+
         if (!isLiquidator[liquidator]) revert NotLiquidator();
         PerpsTypes.Market storage m = _market(marketId);
 
@@ -430,75 +448,53 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         _setBalance(liquidator, marketId, liqBal);
         _clearBalance(account, marketId);
 
-        emit Liquidated(
-            marketId, account, liquidator, userBal.position, userBal.margin, mark, liqBal.margin, liqBal.position
-        );
+        emit Liquidated(marketId, account, liquidator, userBal.position, userBal.margin, mark);
     }
 
-    /// @notice ADL: force trade account against liquidator at mark when L equity is below threshold.
-    function executeAdl(
-        uint256 marketId,
-        address account,
-        address liquidator,
-        uint256 amount,
-        bool userIsBuy
-    ) external onlyOperator {
+    function _executeAdl(PerpsTypes.AdlExecution calldata execution) private {
+        uint256 marketId = execution.marketId;
+        address account = execution.account;
+        address liquidator = execution.liquidator;
+        uint256 amount = execution.amount;
+        uint256 priceX18 = execution.priceX18;
+
+        if (priceX18 == 0) revert PriceInvalid();
         if (!isLiquidator[liquidator]) revert NotLiquidator();
 
         PerpsTypes.FundingIndex memory index = _advanceFundingIndex(marketId);
         _settleAccountFunding(account, marketId, index);
         _settleAccountFunding(liquidator, marketId, index);
 
-        if (!_isAdlTriggered(marketId, liquidator)) revert AdlNotTriggered();
+        uint256 mark = IPerpsOracle(oracle).getPrice(marketId);
+        if (!_isAdlTriggered(marketId, liquidator, mark)) revert AdlNotTriggered();
 
         PerpsTypes.Balance memory userBal = balances[account][marketId];
         if (userBal.position == 0) revert NothingToLiquidate();
-        // Close only. A larger fill, or the wrong side, would open the opposite position.
-        if (userIsBuy) {
-            if (userBal.position >= 0 || amount > uint256(-userBal.position)) revert AdlExceedsPosition();
-        } else if (userBal.position <= 0 || amount > uint256(userBal.position)) {
-            revert AdlExceedsPosition();
-        }
+        // Close only: a short buys, a long sells. A larger fill would open the other side.
+        bool userIsBuy = userBal.position < 0;
+        uint256 closable = userIsBuy ? uint256(-userBal.position) : uint256(userBal.position);
+        if (amount > closable) revert AdlExceedsPosition();
 
-        uint256 mark = IPerpsOracle(oracle).getPrice(marketId);
         PerpsTypes.Balance memory liqBal = balances[liquidator][marketId];
 
-        // Account is taker vs liquidator as maker.
+        // Account is taker vs liquidator as maker. Fill price is the caller's, not mark.
         (PerpsTypes.Balance memory newUser, PerpsTypes.Balance memory newLiq) =
-            PerpsMath.applyTrade(userBal, liqBal, amount, mark, userIsBuy);
+            PerpsMath.applyTrade(userBal, liqBal, amount, priceX18, userIsBuy);
+
+        // Flat negative margin is uncollectable. Checked here so it does not depend on the vault sweep.
+        if (newUser.position == 0 && newUser.margin < 0) revert InsufficientMargin();
+
+        int256 positionDelta = newLiq.position - liqBal.position;
+        int256 marginDelta = newLiq.margin - liqBal.margin;
 
         _setBalance(account, marketId, newUser);
         _setBalance(liquidator, marketId, newLiq);
+        emit AdlExecuted(marketId, account, liquidator, positionDelta, marginDelta, priceX18, mark);
+
         _tryReturnMarginToVault(account, marketId);
-        _tryReturnMarginToVault(liquidator, marketId);
-
-        PerpsTypes.Balance memory userAfter = balances[account][marketId];
-        PerpsTypes.Balance memory liqAfter = balances[liquidator][marketId];
-        emit AdlExecuted(
-            marketId,
-            account,
-            liquidator,
-            userIsBuy ? int256(amount) : -int256(amount),
-            mark,
-            userAfter.margin,
-            userAfter.position,
-            liqAfter.margin,
-            liqAfter.position
-        );
     }
 
-    function isAdlTriggered(uint256 marketId, address liquidator) external view returns (bool) {
-        _requireMarket(marketId);
-        if (!isLiquidator[liquidator]) return false;
-        return _isAdlTriggered(marketId, liquidator);
-    }
-
-    // -------------------------------------------------------------------------
-    // Internal
-    // -------------------------------------------------------------------------
-
-    function _isAdlTriggered(uint256 marketId, address liquidator) private view returns (bool) {
-        uint256 mark = IPerpsOracle(oracle).getPrice(marketId);
+    function _isAdlTriggered(uint256 marketId, address liquidator, uint256 mark) private view returns (bool) {
         PerpsTypes.Balance storage b = balances[liquidator][marketId];
         return PerpsMath.equity(b.margin, b.position, mark) < int256(markets[marketId].adlEquityThreshold);
     }

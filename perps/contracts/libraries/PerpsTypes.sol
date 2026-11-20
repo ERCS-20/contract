@@ -62,6 +62,23 @@ library PerpsTypes {
         uint256 priceX18;
     }
 
+    /// @notice One liquidation: merge `account`'s full Balance into `liquidator`.
+    struct Liquidation {
+        uint256 marketId;
+        address account;
+        address liquidator;
+    }
+
+    /// @notice One ADL close: `account` trades `amount` against `liquidator` at `priceX18`.
+    /// @dev Side is the one that reduces `account`'s position (short buys, long sells).
+    struct AdlExecution {
+        uint256 marketId;
+        address account;
+        address liquidator;
+        uint256 amount;
+        uint256 priceX18;
+    }
+
     struct TradeSettlement {
         Order takerOrder;
         bytes takerSignature;
