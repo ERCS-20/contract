@@ -14,6 +14,9 @@ const MAKER_FEE_BPS = 2n;
 const TAKER_FEE_BPS = 5n;
 const FEE_DENOM = 10_000n;
 
+const LIQ_TRADE_HASH =
+  "0x1111111111111111111111111111111111111111111111111111111111111111" as const;
+
 function tradeFees(amount: bigint, priceX18: bigint) {
   const notional = (amount * priceX18) / COL;
   return {
@@ -533,9 +536,9 @@ describe("PerpsExchange", async function () {
     assert.equal(makerBal[1], -amount);
   });
 
-  it("liquidate reverts when account is still collateralized", async function () {
+  it("liquidate skips a collateralized account and continues the batch", async function () {
     const ctx = await deployPerpsSystem();
-    const { viem, publicClient, maker, taker, operator, liquidator, exchange, MARKET_ID } = ctx;
+    const { viem, publicClient, maker, taker, operator, liquidator, exchange, oracle, MARKET_ID } = ctx;
 
     const amount = 1n * COL;
     const orderMargin = 200n * COL;
@@ -546,16 +549,33 @@ describe("PerpsExchange", async function () {
       client: { public: publicClient, wallet: operator },
     });
     await settleOne(ctx, exchangeAsOp, maker, taker, amount, orderMargin, 1n, 1n);
+    await oracle.write.setPrice([MARKET_ID, 280n * COL]);
 
-    await viem.assertions.revertWithCustomError(
-      exchangeAsOp.write.liquidate([[{
-        marketId: MARKET_ID,
-        account: taker.account.address,
-        liquidator: liquidator.account.address,
-      }]]),
-      exchange,
-      "NotLiquidatable",
-    );
+    // Taker long is still healthy. Maker short is liquidatable and must still be merged.
+    await exchangeAsOp.write.liquidate([
+      LIQ_TRADE_HASH,
+      280n * COL,
+      [
+        {
+          marketId: MARKET_ID,
+          account: taker.account.address,
+          liquidator: liquidator.account.address,
+        },
+        {
+          marketId: MARKET_ID,
+          account: maker.account.address,
+          liquidator: liquidator.account.address,
+        },
+      ],
+    ]);
+
+    const takerBal = await exchange.read.balances([taker.account.address, MARKET_ID]);
+    assert.equal(takerBal[1], amount);
+    const makerBal = await exchange.read.balances([maker.account.address, MARKET_ID]);
+    assert.equal(makerBal[0], 0n);
+    assert.equal(makerBal[1], 0n);
+    const liqBal = await exchange.read.balances([liquidator.account.address, MARKET_ID]);
+    assert.equal(liqBal[1], -amount);
   });
 
   it("liquidate moves undercollateralized position into liquidator", async function () {
@@ -574,7 +594,8 @@ describe("PerpsExchange", async function () {
       ADL_THRESHOLD,
     } = ctx;
 
-    // Short opened @100 with margin ≈ 300. Mark 280 makes 110% fail (needs 308).
+    // Short opened @100 with margin ≈ 300. Mark 280 fails 112% (110% + 2%).
+    // Passed price is 200 and is not used for the check.
     const amount = 1n * COL;
     const orderMargin = 200n * COL;
     await fundAndDeposit(ctx, maker, 500n * COL);
@@ -587,11 +608,15 @@ describe("PerpsExchange", async function () {
     await settleOne(ctx, exchangeAsOp, maker, taker, amount, orderMargin, 1n, 1n);
     const { makerFee } = tradeFees(amount, PRICE);
     await oracle.write.setPrice([MARKET_ID, 280n * COL]);
-    await exchangeAsOp.write.liquidate([[{
-      marketId: MARKET_ID,
-      account: maker.account.address,
-      liquidator: liquidator.account.address,
-    }]]);
+    await exchangeAsOp.write.liquidate([
+      LIQ_TRADE_HASH,
+      200n * COL,
+      [{
+        marketId: MARKET_ID,
+        account: maker.account.address,
+        liquidator: liquidator.account.address,
+      }],
+    ]);
 
     const makerBal = await exchange.read.balances([maker.account.address, MARKET_ID]);
     assert.equal(makerBal[0], 0n);
@@ -637,11 +662,15 @@ describe("PerpsExchange", async function () {
     await settleOne(ctx, exchangeAsOp, maker, taker, amount, orderMargin, 1n, 1n);
 
     await oracle.write.setPrice([MARKET_ID, 280n * COL]);
-    await exchangeAsOp.write.liquidate([[{
-      marketId: MARKET_ID,
-      account: maker.account.address,
-      liquidator: liquidator.account.address,
-    }]]);
+    await exchangeAsOp.write.liquidate([
+      LIQ_TRADE_HASH,
+      280n * COL,
+      [{
+        marketId: MARKET_ID,
+        account: maker.account.address,
+        liquidator: liquidator.account.address,
+      }],
+    ]);
 
     const vaultBefore = await vault.read.balances([liquidator.account.address]);
     // ADL sells the remaining long against L's short. L's margin stays parked.
@@ -691,11 +720,15 @@ describe("PerpsExchange", async function () {
 
     // Raise mark so the short is undercollateralized, then liquidate into L.
     await oracle.write.setPrice([MARKET_ID, 280n * COL]);
-    await exchangeAsOp.write.liquidate([[{
-      marketId: MARKET_ID,
-      account: maker.account.address,
-      liquidator: liquidator.account.address,
-    }]]);
+    await exchangeAsOp.write.liquidate([
+      LIQ_TRADE_HASH,
+      280n * COL,
+      [{
+        marketId: MARKET_ID,
+        account: maker.account.address,
+        liquidator: liquidator.account.address,
+      }],
+    ]);
 
     assert.equal(
       await exchange.read.isAdlTriggered([MARKET_ID, liquidator.account.address]),
@@ -787,11 +820,15 @@ describe("PerpsExchange", async function () {
 
     // Mark 280: short is liquidatable, merged equity stays above the default threshold.
     await oracle.write.setPrice([MARKET_ID, 280n * COL]);
-    await exchangeAsOp.write.liquidate([[{
-      marketId: MARKET_ID,
-      account: maker.account.address,
-      liquidator: liquidator.account.address,
-    }]]);
+    await exchangeAsOp.write.liquidate([
+      LIQ_TRADE_HASH,
+      280n * COL,
+      [{
+        marketId: MARKET_ID,
+        account: maker.account.address,
+        liquidator: liquidator.account.address,
+      }],
+    ]);
 
     const margin = ADL_THRESHOLD + 300n * COL - makerFee;
     const equity = margin - 280n * COL;
@@ -845,11 +882,15 @@ describe("PerpsExchange", async function () {
 
     // Merged equity is about -50 while margin stays near 350, above the default threshold.
     await oracle.write.setPrice([MARKET_ID, 400n * COL]);
-    await exchangeAsOp.write.liquidate([[{
-      marketId: MARKET_ID,
-      account: maker.account.address,
-      liquidator: liquidator.account.address,
-    }]]);
+    await exchangeAsOp.write.liquidate([
+      LIQ_TRADE_HASH,
+      400n * COL,
+      [{
+        marketId: MARKET_ID,
+        account: maker.account.address,
+        liquidator: liquidator.account.address,
+      }],
+    ]);
 
     const margin = ADL_THRESHOLD + 300n * COL - makerFee;
     const liqBal = await exchange.read.balances([liquidator.account.address, MARKET_ID]);

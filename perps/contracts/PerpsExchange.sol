@@ -27,6 +27,8 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     uint256 public constant FEE_DENOMINATOR = 10_000;
     uint256 public constant MAKER_FEE_NUMERATOR = 2;
     uint256 public constant TAKER_FEE_NUMERATOR = 5;
+    /// @notice Added to `minCollateralX18` when checking a liquidation. 0.02e18 = 2%.
+    uint256 public constant LIQUIDATION_PENALTY_X18 = 0.02e18;
     /// @notice After final settlement is enabled, users have this long to self-withdraw before DAO may reclaim the pot.
     uint256 public constant FINAL_SETTLEMENT_LOCK = 300 days;
     bytes32 public immutable DOMAIN_SEPARATOR;
@@ -78,7 +80,7 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     event MarginAdded(address indexed account, uint256 indexed marketId, uint256 amount);
     event MarginWithdraw(address indexed account, uint256 indexed marketId, uint256 amount);
     event MarginSettled(address indexed account, uint256 indexed marketId, uint256 amount);
-    event Liquidated(uint256 indexed marketId, address indexed account, address indexed liquidator, int256 positionDelta, int256 marginDelta, uint256 markPriceX18);
+    event Liquidated(uint256 indexed marketId, address indexed account, address indexed liquidator, int256 positionDelta, int256 marginDelta, bytes32 tradeHash, uint256 tradePriceX18, uint256 markPriceX18);
     /// @dev `positionDelta` / `marginDelta` apply to the liquidator. The account's trade deltas are the negation.
     event AdlExecuted(uint256 indexed marketId, address indexed account, address indexed liquidator, int256 positionDelta, int256 marginDelta, uint256 priceX18, uint256 markPriceX18);
     event FinalSettlementEnabled(uint256 indexed marketId, uint256 settlementPriceX18, uint256 lockedAt);
@@ -105,7 +107,6 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     error InvalidFill();
     error PriceInvalid();
     error OrderMismatch();
-    error NotLiquidatable();
     error InvalidMinCollateral();
     error NotLiquidator();
     error NoLastPrice();
@@ -387,12 +388,17 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         _sampleFunding(runMarketId, markets[runMarketId]);
     }
 
-    /// @notice Liquidate each account into its liquidator: merge full Balance (margin + position, signed).
-    /// @dev Applied in order. Post-merge equity may be negative. ADL keys off that equity, not this call.
-    function liquidate(PerpsTypes.Liquidation[] calldata liquidations) external onlyOperator {
+    /// @notice Liquidate each account into its liquidator. The batch is priced at `tradePriceX18` from `tradeHash`.
+    /// @dev Eligibility uses the live mark and `minCollateralX18 + 2%`. A still-collateralized account is skipped.
+    ///      Applied in order. Post-merge equity may be negative.
+    function liquidate(bytes32 tradeHash, uint256 tradePriceX18, PerpsTypes.Liquidation[] calldata liquidations)
+        external
+        onlyOperator
+    {
+        if (tradePriceX18 == 0) revert PriceInvalid();
         uint256 length = liquidations.length;
         for (uint256 i; i < length;) {
-            _liquidate(liquidations[i]);
+            _liquidate(tradeHash, tradePriceX18, liquidations[i]);
             unchecked {
                 ++i;
             }
@@ -421,7 +427,7 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     // Internal
     // -------------------------------------------------------------------------
 
-    function _liquidate(PerpsTypes.Liquidation calldata liquidation) private {
+    function _liquidate(bytes32 tradeHash, uint256 tradePriceX18, PerpsTypes.Liquidation calldata liquidation) private {
         uint256 marketId = liquidation.marketId;
         address account = liquidation.account;
         address liquidator = liquidation.liquidator;
@@ -436,9 +442,8 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         PerpsTypes.Balance memory userBal = balances[account][marketId];
         if (userBal.position == 0) revert NothingToLiquidate();
         uint256 mark = IPerpsOracle(oracle).getPrice(marketId);
-
-        if (PerpsMath.isCollateralized(userBal.margin, userBal.position, mark, m.minCollateralX18)) {
-            revert NotLiquidatable();
+        if (PerpsMath.isCollateralized(userBal.margin, userBal.position, mark, m.minCollateralX18 + LIQUIDATION_PENALTY_X18)) {
+            return;
         }
 
         PerpsTypes.Balance memory liqBal = balances[liquidator][marketId];
@@ -448,7 +453,7 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         _setBalance(liquidator, marketId, liqBal);
         _clearBalance(account, marketId);
 
-        emit Liquidated(marketId, account, liquidator, userBal.position, userBal.margin, mark);
+        emit Liquidated(marketId, account, liquidator, userBal.position, userBal.margin, tradeHash, tradePriceX18, mark);
     }
 
     function _executeAdl(PerpsTypes.AdlExecution calldata execution) private {
@@ -478,8 +483,7 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         PerpsTypes.Balance memory liqBal = balances[liquidator][marketId];
 
         // Account is taker vs liquidator as maker. Fill price is the caller's, not mark.
-        (PerpsTypes.Balance memory newUser, PerpsTypes.Balance memory newLiq) =
-            PerpsMath.applyTrade(userBal, liqBal, amount, priceX18, userIsBuy);
+        (PerpsTypes.Balance memory newUser, PerpsTypes.Balance memory newLiq) = PerpsMath.applyTrade(userBal, liqBal, amount, priceX18, userIsBuy);
 
         // Flat negative margin is uncollectable. Checked here so it does not depend on the vault sweep.
         if (newUser.position == 0 && newUser.margin < 0) revert InsufficientMargin();
@@ -546,12 +550,8 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         // Storage in-place, maker then taker. Same trader aliases one slot so self-trades net
         // correctly (memory copies + double _setBalance would let the second write clobber the first).
         // Both opening checks above read position before either write.
-        uint256 makerFee = _applyFillSide(
-            makerOrder.trader, marketId, fill.amount, fill.priceX18, makerOrder.isBuy, makerMarginIn, false
-        );
-        uint256 takerFee = _applyFillSide(
-            takerOrder.trader, marketId, fill.amount, fill.priceX18, takerOrder.isBuy, takerMarginIn, true
-        );
+        uint256 makerFee = _applyFillSide(makerOrder.trader, marketId, fill.amount, fill.priceX18, makerOrder.isBuy, makerMarginIn, false);
+        uint256 takerFee = _applyFillSide(takerOrder.trader, marketId, fill.amount, fill.priceX18, takerOrder.isBuy, takerMarginIn, true);
         if (makerOrder.trader == takerOrder.trader) {
             if (makerOpened || takerOpened) {
                 _requireOpenedCollateral(makerOrder.trader, marketId, fill.priceX18);
