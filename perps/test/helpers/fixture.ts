@@ -30,6 +30,7 @@ export async function deployPerpsSystem() {
   await vault.write.setPauseDAO([daoWallet.account.address]);
   await vault.write.setClaimFeeDAO([claimFeeDao.account.address]);
   await exchangeAsDao.write.setOperator([operator.account.address, true]);
+  await exchangeAsDao.write.setRiskOperator([operator.account.address, true]);
   await exchangeAsDao.write.setLiquidator([liquidator.account.address, true]);
   await exchange.write.setFactory([deployer.account.address]);
   await exchangeAsDao.write.setOracle([oracle.address]);

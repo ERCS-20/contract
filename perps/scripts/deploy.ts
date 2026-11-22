@@ -19,6 +19,7 @@ async function main() {
   const withdrawDao = "0xa0Ee7A142d267C1f36714E4a8F75612F20a79720";
   const operator = "0x90F79bf6EB2c4f870365E785982E1f101E93b906";
   const liquidator = "0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65";
+  const riskOperator = "0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc";
   const fee = parseEther("1000");
 
   const exchange = await viem.deployContract("PerpsExchange", []);
@@ -53,6 +54,7 @@ async function main() {
 
   await exchange.write.setFactory([pairFactory.address]);
   await exchangeAsDao.write.setOperator([operator, true]);
+  await exchangeAsDao.write.setRiskOperator([riskOperator, true]);
   await exchangeAsDao.write.setLiquidator([liquidator, true]);
 
   await vault.write.setWithdrawDAO([withdrawDao]);
@@ -60,7 +62,7 @@ async function main() {
   // await vault.write.setClaimFeeDAO([]);
 
   await pairFactory.write.setInsuranceAccount([liquidator]);
-  console.log("Roles wired (DAO / operator / liquidator / insurance)");
+  console.log("Roles wired (DAO / operator / risk operator / liquidator / insurance)");
   await pairFactory.write.setFee([fee]);
 
   const openingTime = BigInt(Math.floor(Date.now() / 1000));

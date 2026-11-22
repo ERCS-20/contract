@@ -536,6 +536,33 @@ describe("PerpsExchange", async function () {
     assert.equal(makerBal[1], -amount);
   });
 
+  it("liquidate rejects an operator who is not a risk operator", async function () {
+    const ctx = await deployPerpsSystem();
+    const { viem, publicClient, dao, operator, liquidator, exchange, MARKET_ID, PRICE } = ctx;
+
+    const exchangeAsDao = await viem.getContractAt("PerpsExchange", exchange.address, {
+      client: { public: publicClient, wallet: dao },
+    });
+    await exchangeAsDao.write.setRiskOperator([operator.account.address, false]);
+
+    const exchangeAsOp = await viem.getContractAt("PerpsExchange", exchange.address, {
+      client: { public: publicClient, wallet: operator },
+    });
+    await viem.assertions.revertWithCustomError(
+      exchangeAsOp.write.liquidate([
+        LIQ_TRADE_HASH,
+        PRICE,
+        [{
+          marketId: MARKET_ID,
+          account: operator.account.address,
+          liquidator: liquidator.account.address,
+        }],
+      ]),
+      exchange,
+      "NotRiskOperator",
+    );
+  });
+
   it("liquidate skips a collateralized account and continues the batch", async function () {
     const ctx = await deployPerpsSystem();
     const { viem, publicClient, maker, taker, operator, liquidator, exchange, oracle, MARKET_ID } = ctx;

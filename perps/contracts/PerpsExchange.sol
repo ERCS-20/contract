@@ -46,6 +46,8 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     /// @notice Protocol DAOs authorized for admin configuration (vault, oracles, pause, etc.).
     mapping(address => bool) public dao;
     mapping(address => bool) public isOperator;
+    /// @notice May liquidate and run ADL. Separate from `isOperator`, which only settles trades and samples oracles.
+    mapping(address => bool) public isRiskOperator;
     /// @notice Global liquidator allowlist (same L set for all markets).
     mapping(address => bool) public isLiquidator;
     /// @notice Session signers: trader => signer => allowed to sign Order for trader.
@@ -64,6 +66,7 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     event DAOSet(address indexed account, bool allowed);
     event FactorySet(address indexed factory);
     event OperatorSet(address indexed account, bool allowed);
+    event RiskOperatorSet(address indexed account, bool allowed);
     event LiquidatorSet(address indexed account, bool allowed);
     event SignerSet(address indexed trader, address indexed signer, bool allowed);
     event MarketCreated(uint256 indexed marketId, address indexed ercs20, uint256 adlEquityThreshold, uint256 minCollateralX18);
@@ -88,6 +91,7 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     event FinalSettlementPotReclaimed(uint256 indexed marketId, address indexed to, uint256 amount);
 
     error NotOperator();
+    error NotRiskOperator();
     error NotDAO();
     error NotFactory();
     error NotFactoryOrLiquidator();
@@ -115,6 +119,11 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
 
     modifier onlyOperator() {
         if (!isOperator[msg.sender]) revert NotOperator();
+        _;
+    }
+
+    modifier onlyRiskOperator() {
+        if (!isRiskOperator[msg.sender]) revert NotRiskOperator();
         _;
     }
 
@@ -159,6 +168,12 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     function setOperator(address account, bool allowed) external onlyDAO {
         isOperator[account] = allowed;
         emit OperatorSet(account, allowed);
+    }
+
+    /// @notice Grant or revoke the right to liquidate and execute ADL.
+    function setRiskOperator(address account, bool allowed) external onlyDAO {
+        isRiskOperator[account] = allowed;
+        emit RiskOperatorSet(account, allowed);
     }
 
     function setLiquidator(address account, bool allowed) external onlyDAO {
@@ -393,7 +408,7 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     ///      Applied in order. Post-merge equity may be negative.
     function liquidate(bytes32 tradeHash, uint256 tradePriceX18, PerpsTypes.Liquidation[] calldata liquidations)
         external
-        onlyOperator
+        onlyRiskOperator
     {
         if (tradePriceX18 == 0) revert PriceInvalid();
         uint256 length = liquidations.length;
@@ -407,7 +422,7 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
 
     /// @notice ADL: force-close each account against its liquidator at the given price when L equity is below threshold.
     /// @dev Applied in order. Later rows see balances updated by earlier rows in the same call.
-    function executeAdl(PerpsTypes.AdlExecution[] calldata executions) external onlyOperator {
+    function executeAdl(PerpsTypes.AdlExecution[] calldata executions) external onlyRiskOperator {
         uint256 length = executions.length;
         for (uint256 i; i < length;) {
             _executeAdl(executions[i]);
