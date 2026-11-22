@@ -403,17 +403,13 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         _sampleFunding(runMarketId, markets[runMarketId]);
     }
 
-    /// @notice Liquidate each account into its liquidator. The batch is priced at `tradePriceX18` from `tradeHash`.
+    /// @notice Liquidate each account into its liquidator. Each row carries its own trade hash and price.
     /// @dev Eligibility uses the live mark and `minCollateralX18 + 2%`. A still-collateralized account is skipped.
     ///      Applied in order. Post-merge equity may be negative.
-    function liquidate(bytes32 tradeHash, uint256 tradePriceX18, PerpsTypes.Liquidation[] calldata liquidations)
-        external
-        onlyRiskOperator
-    {
-        if (tradePriceX18 == 0) revert PriceInvalid();
+    function liquidate(PerpsTypes.Liquidation[] calldata liquidations) external onlyRiskOperator {
         uint256 length = liquidations.length;
         for (uint256 i; i < length;) {
-            _liquidate(tradeHash, tradePriceX18, liquidations[i]);
+            _liquidate(liquidations[i]);
             unchecked {
                 ++i;
             }
@@ -442,12 +438,15 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     // Internal
     // -------------------------------------------------------------------------
 
-    function _liquidate(bytes32 tradeHash, uint256 tradePriceX18, PerpsTypes.Liquidation calldata liquidation) private {
+    function _liquidate(PerpsTypes.Liquidation calldata liquidation) private {
         uint256 marketId = liquidation.marketId;
         address account = liquidation.account;
         address liquidator = liquidation.liquidator;
+        bytes32 tradeHash = liquidation.tradeHash;
+        uint256 tradePriceX18 = liquidation.tradePriceX18;
 
         if (!isLiquidator[liquidator]) revert NotLiquidator();
+        if (tradePriceX18 == 0) revert PriceInvalid();
         PerpsTypes.Market storage m = _market(marketId);
 
         PerpsTypes.FundingIndex memory index = _advanceFundingIndex(marketId);

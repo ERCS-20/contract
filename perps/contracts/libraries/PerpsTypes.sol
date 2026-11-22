@@ -63,10 +63,13 @@ library PerpsTypes {
     }
 
     /// @notice One liquidation: merge `account`'s full Balance into `liquidator`.
+    /// @dev `tradeHash` / `tradePriceX18` identify the trade this close is priced from.
     struct Liquidation {
         uint256 marketId;
         address account;
         address liquidator;
+        bytes32 tradeHash;
+        uint256 tradePriceX18;
     }
 
     /// @notice One ADL close: `account` trades `amount` against `liquidator` at `priceX18`.
