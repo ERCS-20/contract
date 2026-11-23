@@ -72,14 +72,10 @@ library PerpsTypes {
         uint256 tradePriceX18;
     }
 
-    /// @notice One ADL close: `account` trades `amount` against `liquidator` at `priceX18`.
-    /// @dev Side is the one that reduces `account`'s position (short buys, long sells).
+    /// @notice One ADL close of `amount` against the call's liquidator. Side reduces `account`'s position.
     struct AdlExecution {
-        uint256 marketId;
         address account;
-        address liquidator;
         uint256 amount;
-        uint256 priceX18;
     }
 
     struct TradeSettlement {

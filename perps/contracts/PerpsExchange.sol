@@ -107,6 +107,7 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     error InvalidSignature();
     error AdlNotTriggered();
     error AdlExceedsPosition();
+    error AdlEquityExceeded();
     error NothingToLiquidate();
     error InvalidFill();
     error PriceInvalid();
@@ -403,8 +404,8 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         _sampleFunding(runMarketId, markets[runMarketId]);
     }
 
-    /// @notice Liquidate each account into its liquidator. Each row carries its own trade hash and price.
-    /// @dev Eligibility uses the live mark and `minCollateralX18 + 2%`. A still-collateralized account is skipped.
+    /// @notice Liquidate each account into its liquidator. Each row carries its own market and trade.
+    /// @dev Eligibility uses that row's mark and `minCollateralX18 + 2%`. A still-collateralized account is skipped.
     ///      Applied in order. Post-merge equity may be negative.
     function liquidate(PerpsTypes.Liquidation[] calldata liquidations) external onlyRiskOperator {
         uint256 length = liquidations.length;
@@ -416,16 +417,30 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         }
     }
 
-    /// @notice ADL: force-close each account against its liquidator at the given price when L equity is below threshold.
-    /// @dev Applied in order. Later rows see balances updated by earlier rows in the same call.
-    function executeAdl(PerpsTypes.AdlExecution[] calldata executions) external onlyRiskOperator {
+    /// @notice ADL one market: force-close each account against `liquidator` at `priceX18`.
+    /// @dev One mark and one trigger check for the batch. Afterwards L's mark equity must be <= 1.1x the ADL threshold.
+    function executeAdl(uint256 marketId, address liquidator, uint256 priceX18, PerpsTypes.AdlExecution[] calldata executions) external onlyRiskOperator {
+        if (priceX18 == 0) revert PriceInvalid();
+        if (!isLiquidator[liquidator]) revert NotLiquidator();
         uint256 length = executions.length;
+        if (length == 0) return;
+
+        _requireMarket(marketId);
+        PerpsTypes.FundingIndex memory index = _advanceFundingIndex(marketId);
+        _settleAccountFunding(liquidator, marketId, index);
+        uint256 mark = IPerpsOracle(oracle).getPrice(marketId);
+        if (!_isAdlTriggered(marketId, liquidator, mark)) revert AdlNotTriggered();
+
         for (uint256 i; i < length;) {
-            _executeAdl(executions[i]);
+            _executeAdl(marketId, executions[i], liquidator, priceX18, mark, index);
             unchecked {
                 ++i;
             }
         }
+
+        uint256 cap = markets[marketId].adlEquityThreshold * 11 / 10;
+        PerpsTypes.Balance storage b = balances[liquidator][marketId];
+        if (PerpsMath.equity(b.margin, b.position, mark) > int256(cap)) revert AdlEquityExceeded();
     }
 
     function isAdlTriggered(uint256 marketId, address liquidator) external view returns (bool) {
@@ -460,54 +475,47 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
             return;
         }
 
-        PerpsTypes.Balance memory liqBal = balances[liquidator][marketId];
+        // Clear first, then credit storage. Same address reads the cleared slot and adds the saved balance back.
+        _clearBalance(account, marketId);
+        PerpsTypes.Balance storage liqBal = balances[liquidator][marketId];
         liqBal.margin += userBal.margin;
         liqBal.position += userBal.position;
-
-        _setBalance(liquidator, marketId, liqBal);
-        _clearBalance(account, marketId);
 
         emit Liquidated(marketId, account, liquidator, userBal.position, userBal.margin, tradeHash, tradePriceX18, mark);
     }
 
-    function _executeAdl(PerpsTypes.AdlExecution calldata execution) private {
-        uint256 marketId = execution.marketId;
+    function _executeAdl(
+        uint256 marketId,
+        PerpsTypes.AdlExecution calldata execution,
+        address liquidator,
+        uint256 priceX18,
+        uint256 mark,
+        PerpsTypes.FundingIndex memory index
+    ) private {
         address account = execution.account;
-        address liquidator = execution.liquidator;
         uint256 amount = execution.amount;
-        uint256 priceX18 = execution.priceX18;
 
-        if (priceX18 == 0) revert PriceInvalid();
-        if (!isLiquidator[liquidator]) revert NotLiquidator();
-
-        PerpsTypes.FundingIndex memory index = _advanceFundingIndex(marketId);
         _settleAccountFunding(account, marketId, index);
-        _settleAccountFunding(liquidator, marketId, index);
 
-        uint256 mark = IPerpsOracle(oracle).getPrice(marketId);
-        if (!_isAdlTriggered(marketId, liquidator, mark)) revert AdlNotTriggered();
-
-        PerpsTypes.Balance memory userBal = balances[account][marketId];
+        PerpsTypes.Balance storage userBal = balances[account][marketId];
         if (userBal.position == 0) revert NothingToLiquidate();
         // Close only: a short buys, a long sells. A larger fill would open the other side.
         bool userIsBuy = userBal.position < 0;
         uint256 closable = userIsBuy ? uint256(-userBal.position) : uint256(userBal.position);
         if (amount > closable) revert AdlExceedsPosition();
 
-        PerpsTypes.Balance memory liqBal = balances[liquidator][marketId];
+        // User side first. Liquidator then reads storage, so one address nets instead of the second write clobbering the first.
+        int256 posAmt = int256(amount);
+        int256 quoteAmt = int256((amount * priceX18) / PerpsTypes.ONE_X18);
+        int256 userPosDelta = userIsBuy ? posAmt : -posAmt;
+        int256 userMarginDelta = userIsBuy ? -quoteAmt : quoteAmt;
+        userBal.position += userPosDelta;
+        userBal.margin += userMarginDelta;
 
-        // Account is taker vs liquidator as maker. Fill price is the caller's, not mark.
-        (PerpsTypes.Balance memory newUser, PerpsTypes.Balance memory newLiq) = PerpsMath.applyTrade(userBal, liqBal, amount, priceX18, userIsBuy);
-
-        // Flat negative margin is uncollectable. Checked here so it does not depend on the vault sweep.
-        if (newUser.position == 0 && newUser.margin < 0) revert InsufficientMargin();
-
-        int256 positionDelta = newLiq.position - liqBal.position;
-        int256 marginDelta = newLiq.margin - liqBal.margin;
-
-        _setBalance(account, marketId, newUser);
-        _setBalance(liquidator, marketId, newLiq);
-        emit AdlExecuted(marketId, account, liquidator, positionDelta, marginDelta, priceX18, mark);
+        PerpsTypes.Balance storage liqBal = balances[liquidator][marketId];
+        liqBal.position -= userPosDelta;
+        liqBal.margin -= userMarginDelta;
+        emit AdlExecuted(marketId, account, liquidator, -userPosDelta, -userMarginDelta, priceX18, mark);
 
         _tryReturnMarginToVault(account, marketId);
     }

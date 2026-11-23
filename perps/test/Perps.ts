@@ -695,13 +695,15 @@ describe("PerpsExchange", async function () {
 
     const vaultBefore = await vault.read.balances([liquidator.account.address]);
     // ADL sells the remaining long against L's short. L's margin stays parked.
-    await exchangeAsOp.write.executeAdl([[{
-      marketId: MARKET_ID,
-      account: taker.account.address,
-      liquidator: liquidator.account.address,
-      amount,
-      priceX18: 280n * COL,
-    }]]);
+    await exchangeAsOp.write.executeAdl([
+      MARKET_ID,
+      liquidator.account.address,
+      280n * COL,
+      [{
+        account: taker.account.address,
+        amount,
+      }],
+    ]);
     const liqBal = await exchange.read.balances([liquidator.account.address, MARKET_ID]);
     assert.equal(liqBal[1], 0n);
     assert.ok(liqBal[0] > 0n);
@@ -758,13 +760,15 @@ describe("PerpsExchange", async function () {
     // Fill below mark so the short liquidator buys back cheaper than the oracle.
     const adlPrice = 200n * COL;
     const adl = (adlAmount: bigint) =>
-      exchangeAsOp.write.executeAdl([[{
-        marketId: MARKET_ID,
-        account: taker.account.address,
-        liquidator: liquidator.account.address,
-        amount: adlAmount,
-        priceX18: adlPrice,
-      }]]);
+      exchangeAsOp.write.executeAdl([
+        MARKET_ID,
+        liquidator.account.address,
+        adlPrice,
+        [{
+          account: taker.account.address,
+          amount: adlAmount,
+        }],
+      ]);
     await assert.rejects(adl(amount + 1n), /AdlExceedsPosition/);
     const liqBefore = await exchange.read.balances([liquidator.account.address, MARKET_ID]);
     await adl(amount);
@@ -794,13 +798,15 @@ describe("PerpsExchange", async function () {
     // Long equity falls under the ADL line. Covering the short at 160 would leave it negative.
     await oracle.write.setPrice([MARKET_ID, 1n * COL]);
     await viem.assertions.revertWithCustomError(
-      exchangeAsOp.write.executeAdl([[{
-        marketId: MARKET_ID,
-        account: maker.account.address,
-        liquidator: liquidator.account.address,
-        amount,
-        priceX18: 160n * COL,
-      }]]),
+      exchangeAsOp.write.executeAdl([
+        MARKET_ID,
+        liquidator.account.address,
+        160n * COL,
+        [{
+          account: maker.account.address,
+          amount,
+        }],
+      ]),
       exchange,
       "InsufficientMargin",
     );
