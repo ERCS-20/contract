@@ -118,7 +118,7 @@ contract PerpsPairFactory is Ownable {
         if (!ercs20Factory.ercs20s(baseToken)) revert NotERCS20();
         if (IERCS20(baseToken).owner() != msg.sender) revert NotTokenOwner();
         _validateErcs20OpeningPrice(baseToken);
-        _createMarket(baseToken, fee / 2, defaultMinCollateralX18, openingTime);
+        _createMarket(baseToken, fee, defaultMinCollateralX18, openingTime);
     }
 
     function _createMarket(
