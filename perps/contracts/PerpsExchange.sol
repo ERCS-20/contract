@@ -27,8 +27,6 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     uint256 public constant FEE_DENOMINATOR = 10_000;
     uint256 public constant MAKER_FEE_NUMERATOR = 2;
     uint256 public constant TAKER_FEE_NUMERATOR = 5;
-    /// @notice Added to `minCollateralX18` when checking a liquidation. 0.02e18 = 2%.
-    uint256 public constant LIQUIDATION_PENALTY_X18 = 0.02e18;
     /// @notice After final settlement is enabled, users have this long to self-withdraw before DAO may reclaim the pot.
     uint256 public constant FINAL_SETTLEMENT_LOCK = 300 days;
     bytes32 public immutable DOMAIN_SEPARATOR;
@@ -46,8 +44,10 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     /// @notice Protocol DAOs authorized for admin configuration (vault, oracles, pause, etc.).
     mapping(address => bool) public dao;
     mapping(address => bool) public isOperator;
-    /// @notice May liquidate and run ADL. Separate from `isOperator`, which only settles trades and samples oracles.
-    mapping(address => bool) public isRiskOperator;
+    /// @notice May call `liquidate`. Separate from `isOperator` and from `isAdlOperator`.
+    mapping(address => bool) public isLiquidationOperator;
+    /// @notice May call `executeAdl`. Separate from `isOperator` and from `isLiquidationOperator`.
+    mapping(address => bool) public isAdlOperator;
     /// @notice Global liquidator allowlist (same L set for all markets).
     mapping(address => bool) public isLiquidator;
     /// @notice Session signers: trader => signer => allowed to sign Order for trader.
@@ -66,7 +66,8 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     event DAOSet(address indexed account, bool allowed);
     event FactorySet(address indexed factory);
     event OperatorSet(address indexed account, bool allowed);
-    event RiskOperatorSet(address indexed account, bool allowed);
+    event LiquidationOperatorSet(address indexed account, bool allowed);
+    event AdlOperatorSet(address indexed account, bool allowed);
     event LiquidatorSet(address indexed account, bool allowed);
     event SignerSet(address indexed trader, address indexed signer, bool allowed);
     event MarketCreated(uint256 indexed marketId, address indexed ercs20, uint256 adlEquityThreshold, uint256 minCollateralX18);
@@ -91,7 +92,8 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     event FinalSettlementPotReclaimed(uint256 indexed marketId, address indexed to, uint256 amount);
 
     error NotOperator();
-    error NotRiskOperator();
+    error NotLiquidationOperator();
+    error NotAdlOperator();
     error NotDAO();
     error NotFactory();
     error NotFactoryOrLiquidator();
@@ -106,7 +108,6 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     error OrderOverfilled();
     error InvalidSignature();
     error AdlNotTriggered();
-    error AdlExceedsPosition();
     error AdlEquityExceeded();
     error NothingToLiquidate();
     error InvalidFill();
@@ -123,8 +124,13 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         _;
     }
 
-    modifier onlyRiskOperator() {
-        if (!isRiskOperator[msg.sender]) revert NotRiskOperator();
+    modifier onlyLiquidationOperator() {
+        if (!isLiquidationOperator[msg.sender]) revert NotLiquidationOperator();
+        _;
+    }
+
+    modifier onlyAdlOperator() {
+        if (!isAdlOperator[msg.sender]) revert NotAdlOperator();
         _;
     }
 
@@ -171,10 +177,16 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         emit OperatorSet(account, allowed);
     }
 
-    /// @notice Grant or revoke the right to liquidate and execute ADL.
-    function setRiskOperator(address account, bool allowed) external onlyDAO {
-        isRiskOperator[account] = allowed;
-        emit RiskOperatorSet(account, allowed);
+    /// @notice Grant or revoke the right to liquidate.
+    function setLiquidationOperator(address account, bool allowed) external onlyDAO {
+        isLiquidationOperator[account] = allowed;
+        emit LiquidationOperatorSet(account, allowed);
+    }
+
+    /// @notice Grant or revoke the right to execute ADL.
+    function setAdlOperator(address account, bool allowed) external onlyDAO {
+        isAdlOperator[account] = allowed;
+        emit AdlOperatorSet(account, allowed);
     }
 
     function setLiquidator(address account, bool allowed) external onlyDAO {
@@ -405,9 +417,10 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
     }
 
     /// @notice Liquidate each account into its liquidator. Each row carries its own market and trade.
-    /// @dev Eligibility uses that row's mark and `minCollateralX18 + 2%`. A still-collateralized account is skipped.
-    ///      Applied in order. Post-merge equity may be negative.
-    function liquidate(PerpsTypes.Liquidation[] calldata liquidations) external onlyRiskOperator {
+    /// @dev Eligibility uses that row's `tradePriceX18` and `minCollateralX18`. A still-collateralized account is skipped.
+    ///      A mark worse than or equal to that price absorbs the whole balance. A better mark closes at the
+    ///      maintenance price and returns the leftover margin.
+    function liquidate(PerpsTypes.Liquidation[] calldata liquidations) external onlyLiquidationOperator {
         uint256 length = liquidations.length;
         for (uint256 i; i < length;) {
             _liquidate(liquidations[i]);
@@ -417,10 +430,9 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         }
     }
 
-    /// @notice ADL one market: force-close each account against `liquidator` at `priceX18`.
+    /// @notice ADL one market: force-close each account against `liquidator` at that row's `priceX18`.
     /// @dev One mark and one trigger check for the batch. Afterwards L's mark equity must be <= 1.1x the ADL threshold.
-    function executeAdl(uint256 marketId, address liquidator, uint256 priceX18, PerpsTypes.AdlExecution[] calldata executions) external onlyRiskOperator {
-        if (priceX18 == 0) revert PriceInvalid();
+    function executeAdl(uint256 marketId, address liquidator, PerpsTypes.AdlExecution[] calldata executions) external onlyAdlOperator {
         if (!isLiquidator[liquidator]) revert NotLiquidator();
         uint256 length = executions.length;
         if (length == 0) return;
@@ -432,7 +444,7 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         if (!_isAdlTriggered(marketId, liquidator, mark)) revert AdlNotTriggered();
 
         for (uint256 i; i < length;) {
-            _executeAdl(marketId, executions[i], liquidator, priceX18, mark, index);
+            _executeAdl(marketId, executions[i], liquidator, mark, index);
             unchecked {
                 ++i;
             }
@@ -471,38 +483,48 @@ contract PerpsExchange is Ownable, Pausable, ReentrancyGuard {
         PerpsTypes.Balance memory userBal = balances[account][marketId];
         if (userBal.position == 0) revert NothingToLiquidate();
         uint256 mark = IPerpsOracle(oracle).getPrice(marketId);
-        if (PerpsMath.isCollateralized(userBal.margin, userBal.position, mark, m.minCollateralX18 + LIQUIDATION_PENALTY_X18)) {
+        if (PerpsMath.isCollateralized(userBal.margin, userBal.position, tradePriceX18, m.minCollateralX18)) {
             return;
         }
 
-        // Clear first, then credit storage. Same address reads the cleared slot and adds the saved balance back.
-        _clearBalance(account, marketId);
-        PerpsTypes.Balance storage liqBal = balances[liquidator][marketId];
-        liqBal.margin += userBal.margin;
-        liqBal.position += userBal.position;
+        // A better mark closes at the maintenance boundary. Otherwise the liquidator takes the whole balance.
+        bool markImproved = userBal.position < 0 ? mark < tradePriceX18 : mark > tradePriceX18;
+        int256 marginDelta = markImproved
+            ? PerpsMath.maintenanceMarginDelta(userBal.margin, userBal.position, m.minCollateralX18)
+            : userBal.margin;
 
-        emit Liquidated(marketId, account, liquidator, userBal.position, userBal.margin, tradeHash, tradePriceX18, mark);
+        // User first. The liquidator then reads storage, so one address nets back to where it started.
+        PerpsTypes.Balance storage userStore = balances[account][marketId];
+        userStore.margin -= marginDelta;
+        userStore.position = 0;
+        PerpsTypes.Balance storage liqStore = balances[liquidator][marketId];
+        liqStore.margin += marginDelta;
+        liqStore.position += userBal.position;
+
+        emit Liquidated(marketId, account, liquidator, userBal.position, marginDelta, tradeHash, tradePriceX18, mark);
+        _tryReturnMarginToVault(account, marketId);
     }
 
     function _executeAdl(
         uint256 marketId,
         PerpsTypes.AdlExecution calldata execution,
         address liquidator,
-        uint256 priceX18,
         uint256 mark,
         PerpsTypes.FundingIndex memory index
     ) private {
         address account = execution.account;
         uint256 amount = execution.amount;
+        uint256 priceX18 = execution.priceX18;
+        if (priceX18 == 0) revert PriceInvalid();
 
         _settleAccountFunding(account, marketId, index);
 
         PerpsTypes.Balance storage userBal = balances[account][marketId];
-        if (userBal.position == 0) revert NothingToLiquidate();
-        // Close only: a short buys, a long sells. A larger fill would open the other side.
+        // Flat, or a size past the open position: skip this row so later rows still run.
+        if (userBal.position == 0) return;
         bool userIsBuy = userBal.position < 0;
         uint256 closable = userIsBuy ? uint256(-userBal.position) : uint256(userBal.position);
-        if (amount > closable) revert AdlExceedsPosition();
+        if (amount > closable) return;
 
         // User side first. Liquidator then reads storage, so one address nets instead of the second write clobbering the first.
         int256 posAmt = int256(amount);

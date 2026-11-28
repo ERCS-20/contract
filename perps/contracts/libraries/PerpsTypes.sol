@@ -72,10 +72,11 @@ library PerpsTypes {
         uint256 tradePriceX18;
     }
 
-    /// @notice One ADL close of `amount` against the call's liquidator. Side reduces `account`'s position.
+    /// @notice One ADL close of `amount` against the call's liquidator at `priceX18`. Side reduces `account`'s position.
     struct AdlExecution {
         address account;
         uint256 amount;
+        uint256 priceX18;
     }
 
     struct TradeSettlement {

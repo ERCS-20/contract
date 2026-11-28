@@ -536,14 +536,15 @@ describe("PerpsExchange", async function () {
     assert.equal(makerBal[1], -amount);
   });
 
-  it("liquidate rejects an operator who is not a risk operator", async function () {
+  it("liquidate and ADL reject an operator who lacks that role", async function () {
     const ctx = await deployPerpsSystem();
     const { viem, publicClient, dao, operator, liquidator, exchange, MARKET_ID, PRICE } = ctx;
 
     const exchangeAsDao = await viem.getContractAt("PerpsExchange", exchange.address, {
       client: { public: publicClient, wallet: dao },
     });
-    await exchangeAsDao.write.setRiskOperator([operator.account.address, false]);
+    await exchangeAsDao.write.setLiquidationOperator([operator.account.address, false]);
+    await exchangeAsDao.write.setAdlOperator([operator.account.address, false]);
 
     const exchangeAsOp = await viem.getContractAt("PerpsExchange", exchange.address, {
       client: { public: publicClient, wallet: operator },
@@ -557,7 +558,16 @@ describe("PerpsExchange", async function () {
         tradePriceX18: PRICE,
       }]]),
       exchange,
-      "NotRiskOperator",
+      "NotLiquidationOperator",
+    );
+    await viem.assertions.revertWithCustomError(
+      exchangeAsOp.write.executeAdl([
+        MARKET_ID,
+        liquidator.account.address,
+        [{ account: operator.account.address, amount: 1n, priceX18: PRICE }],
+      ]),
+      exchange,
+      "NotAdlOperator",
     );
   });
 
@@ -619,8 +629,8 @@ describe("PerpsExchange", async function () {
       ADL_THRESHOLD,
     } = ctx;
 
-    // Short opened @100 with margin ≈ 300. Mark 280 fails 112% (110% + 2%).
-    // Passed price is 200 and is not used for the check.
+    // Short opened @100 with margin ≈ 300. Trade price 280 fails the 110% check.
+    // Mark 400 is worse, so the whole balance is absorbed.
     const amount = 1n * COL;
     const orderMargin = 200n * COL;
     await fundAndDeposit(ctx, maker, 500n * COL);
@@ -632,13 +642,13 @@ describe("PerpsExchange", async function () {
     });
     await settleOne(ctx, exchangeAsOp, maker, taker, amount, orderMargin, 1n, 1n);
     const { makerFee } = tradeFees(amount, PRICE);
-    await oracle.write.setPrice([MARKET_ID, 280n * COL]);
+    await oracle.write.setPrice([MARKET_ID, 400n * COL]);
     await exchangeAsOp.write.liquidate([[{
       marketId: MARKET_ID,
       account: maker.account.address,
       liquidator: liquidator.account.address,
       tradeHash: LIQ_TRADE_HASH,
-      tradePriceX18: 200n * COL,
+      tradePriceX18: 280n * COL,
     }]]);
 
     const makerBal = await exchange.read.balances([maker.account.address, MARKET_ID]);
@@ -648,6 +658,59 @@ describe("PerpsExchange", async function () {
     const liqBal = await exchange.read.balances([liquidator.account.address, MARKET_ID]);
     // L absorbs the short: margin 200 + 100 - makerFee, position -1.
     assert.equal(liqBal[0], ADL_THRESHOLD + 300n * COL - makerFee);
+    assert.equal(liqBal[1], -amount);
+  });
+
+  it("liquidate returns maintenance leftover when mark improves", async function () {
+    const ctx = await deployPerpsSystem();
+    const {
+      viem,
+      publicClient,
+      maker,
+      taker,
+      operator,
+      liquidator,
+      exchange,
+      vault,
+      oracle,
+      MARKET_ID,
+      PRICE,
+      ADL_THRESHOLD,
+    } = ctx;
+
+    const amount = 1n * COL;
+    const orderMargin = 200n * COL;
+    await fundAndDeposit(ctx, maker, 500n * COL);
+    await fundAndDeposit(ctx, taker, 500n * COL);
+    await seedInsuranceMargin(ctx, liquidator, ADL_THRESHOLD);
+
+    const exchangeAsOp = await viem.getContractAt("PerpsExchange", exchange.address, {
+      client: { public: publicClient, wallet: operator },
+    });
+    await settleOne(ctx, exchangeAsOp, maker, taker, amount, orderMargin, 1n, 1n);
+    const { makerFee } = tradeFees(amount, PRICE);
+    const margin = 300n * COL - makerFee;
+    const charge = (margin * COL) / MIN_COLLATERAL;
+    const refund = margin - charge;
+
+    // Trade price 280 is undercollateralized. Mark 200 is better, so only the maintenance charge is taken.
+    await oracle.write.setPrice([MARKET_ID, 200n * COL]);
+    const vaultBefore = await vault.read.balances([maker.account.address]);
+    await exchangeAsOp.write.liquidate([[{
+      marketId: MARKET_ID,
+      account: maker.account.address,
+      liquidator: liquidator.account.address,
+      tradeHash: LIQ_TRADE_HASH,
+      tradePriceX18: 280n * COL,
+    }]]);
+
+    const makerBal = await exchange.read.balances([maker.account.address, MARKET_ID]);
+    assert.equal(makerBal[0], 0n);
+    assert.equal(makerBal[1], 0n);
+    assert.equal(await vault.read.balances([maker.account.address]), vaultBefore + refund);
+
+    const liqBal = await exchange.read.balances([liquidator.account.address, MARKET_ID]);
+    assert.equal(liqBal[0], ADL_THRESHOLD + charge);
     assert.equal(liqBal[1], -amount);
   });
 
@@ -698,10 +761,10 @@ describe("PerpsExchange", async function () {
     await exchangeAsOp.write.executeAdl([
       MARKET_ID,
       liquidator.account.address,
-      280n * COL,
       [{
         account: taker.account.address,
         amount,
+        priceX18: 280n * COL,
       }],
     ]);
     const liqBal = await exchange.read.balances([liquidator.account.address, MARKET_ID]);
@@ -763,13 +826,15 @@ describe("PerpsExchange", async function () {
       exchangeAsOp.write.executeAdl([
         MARKET_ID,
         liquidator.account.address,
-        adlPrice,
         [{
           account: taker.account.address,
           amount: adlAmount,
+          priceX18: adlPrice,
         }],
       ]);
-    await assert.rejects(adl(amount + 1n), /AdlExceedsPosition/);
+    await adl(amount + 1n);
+    const takerSkipped = await exchange.read.balances([taker.account.address, MARKET_ID]);
+    assert.equal(takerSkipped[1], amount);
     const liqBefore = await exchange.read.balances([liquidator.account.address, MARKET_ID]);
     await adl(amount);
 
@@ -801,10 +866,10 @@ describe("PerpsExchange", async function () {
       exchangeAsOp.write.executeAdl([
         MARKET_ID,
         liquidator.account.address,
-        160n * COL,
         [{
           account: maker.account.address,
           amount,
+          priceX18: 160n * COL,
         }],
       ]),
       exchange,

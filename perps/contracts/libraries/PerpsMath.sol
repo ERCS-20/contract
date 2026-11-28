@@ -76,6 +76,22 @@ library PerpsMath {
         return positive * PerpsTypes.ONE_X18 >= negative * minCollateralX18;
     }
 
+    /// @notice Liquidator margin change for a close exactly at the `isCollateralized` boundary.
+    /// @dev Short: `margin * 1e18 / minCollateral`. Long debt: `-|margin| * minCollateral / 1e18`. Otherwise `margin`.
+    function maintenanceMarginDelta(int256 margin, int256 position, uint256 minCollateralX18)
+        internal
+        pure
+        returns (int256)
+    {
+        if (position < 0 && margin > 0) {
+            return int256(uint256(margin) * PerpsTypes.ONE_X18 / minCollateralX18);
+        }
+        if (position > 0 && margin < 0) {
+            return -int256(uint256(-margin) * minCollateralX18 / PerpsTypes.ONE_X18);
+        }
+        return margin;
+    }
+
     /// @notice Margin delta from funding: `-(indexDelta * position) / 1e18`.
     /// @dev Index up + long => debit; index up + short => credit.
     function fundingMarginDelta(int256 indexDelta, int256 position) internal pure returns (int256) {
